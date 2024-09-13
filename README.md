@@ -1,4 +1,4 @@
-![image](https://github.com/user-attachments/assets/9cd3cf79-d9fe-48e5-aa1b-900d96398e48)### SightOCR 视觉字符识别
+### SightOCR 视觉字符识别
 
 1. **OCR识别**：
    - 支持 `微信OCR` 和 `百度OCR` 两种接口进行图像文本识别。
@@ -12,8 +12,11 @@
 5. **多线程**：
    - 系统托盘图标运行在一个单独的线程中，避免阻塞主线程，从而保持主程序正常响应。
 
-**问题反馈**：
-SightOCR 通知: 175332502
-![image](https://github.com/user-attachments/assets/77ae558d-6e97-4bfe-ae63-9fa6ec993bb6)
+
+#### 问题反馈：
+
+【SightOCR 通知群】[175332502](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=5PkXysHbDS-RVvXJO_AE7OkFEZrIaFYN&authKey=OZ7pUAm4Ek2ZUKmurSP5v2w9lcbQN2%2BnoiGdIJzM0ZT5QsFkrV0CICvkw9C7qIWS&noverify=0&group_code=175332502)	答案：SightOCR
+
+<img src="https://github.com/user-attachments/assets/77ae558d-6e97-4bfe-ae63-9fa6ec993bb6" alt="image" style="zoom: 33%;" />
 
 
