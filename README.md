@@ -17,6 +17,4 @@
 
 【SightOCR 通知群】[175332502](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=5PkXysHbDS-RVvXJO_AE7OkFEZrIaFYN&authKey=OZ7pUAm4Ek2ZUKmurSP5v2w9lcbQN2%2BnoiGdIJzM0ZT5QsFkrV0CICvkw9C7qIWS&noverify=0&group_code=175332502)	答案：SightOCR
 
-<img src="https://github.com/user-attachments/assets/77ae558d-6e97-4bfe-ae63-9fa6ec993bb6" alt="image" style="zoom: 33%;" />
-
 
