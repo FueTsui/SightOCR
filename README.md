@@ -10,7 +10,7 @@
 4. **设置窗口**：
    - 用户可以在设置窗口中配置 `WeChat` 路径、`WeChatOCR` 路径、`百度OCR` API Key 和 Secret Key，以及自定义 OCR 启动快捷键。
 5. **配置文件**：
-   - load_config 和 save_config 函数用于加载和保存配置文件。
+   - config.json 用于加载和保存配置文件。
 
 
 #### 问题反馈：
