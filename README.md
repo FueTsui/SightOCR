@@ -1,4 +1,6 @@
-![icon](https://github.com/user-attachments/assets/13198c44-9172-4323-9d4b-3195a986727d)
+
+<img width="200" height="200" alt="icon" src="https://github.com/user-attachments/assets/ddc06b51-cef5-4e16-a293-cb74df508bbe" />
+
 ### SightOCR 视觉字符识别
 
 1. **OCR识别**：
