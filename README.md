@@ -5,10 +5,11 @@
 
 1. **OCR识别**：
    - 支持 `微信OCR` 和 `百度OCR` 两种接口进行图像文本识别。
-   - 通过鼠标框选屏幕区域进行截屏，截屏后调用 OCR 接口进行文本识别，结果展示在左侧文本框中，并自动复制到剪贴板。
+   - 通过鼠标框选屏幕区域进行截屏，截屏后调用 OCR 接口进行文本识别，结果展示在文本框中，并自动复制到剪贴板。
 2. **翻译**：
    - 支持 `必应` 和 `百度` 两种接口进行文本翻译。
    - 通过鼠标框选屏幕区域进行截屏OCR并翻译，结果自动展示在右侧文本框中，并自动复制翻译结果到剪贴板。
+   - 翻译源支持 "中文", "English", "日本語", "한국어", "Français", "Deutsch", "Русский", "Español"。
 3. **系统托盘图标**：
    - 在程序最小化时，隐藏窗口并通过系统托盘菜单 `主窗口` 、 `识别` 、 `翻译` 、 打开 `设置` 窗口、 `重启` 或者 `退出`程序。
 4. **快捷键支持**：
@@ -16,10 +17,13 @@
    - 翻译 默认快捷键为 `F2`，可以通过设置窗口更改 翻译 启动的快捷键。
 5. **设置窗口**：
    - 用户可以在设置中配置 `微信OCR` 、 `百度OCR` 和 `百度翻译` ，以及自定义 `OCR、翻译快捷键` 。
+   - 开机启动开关、显示和隐藏系统托盘图标开关
 6. **配置文件**：
    - config.json 用于加载和保存配置文件。
+     
+<img width="378" height="377" alt="Pic1718" src="https://github.com/user-attachments/assets/40df29bb-3788-4628-b67a-1a60b02cca8b" /><img width="376" height="274" alt="Pic2602" src="https://github.com/user-attachments/assets/8dbaa3b1-1aa9-4bbc-a5a7-3a893e5bf9d6" />
 
-   **Download**： [云盘](https://fuetsui.lanzouq.com/b0hccia0f)  密码：1212
+   **下载**： [蓝奏云](https://fuetsui.lanzouq.com/b0hccia0f)  密码：1212
 #### 问题反馈：
 
 【SightOCR 通知群】[175332502](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=5PkXysHbDS-RVvXJO_AE7OkFEZrIaFYN&authKey=OZ7pUAm4Ek2ZUKmurSP5v2w9lcbQN2%2BnoiGdIJzM0ZT5QsFkrV0CICvkw9C7qIWS&noverify=0&group_code=175332502)	答案：SightOCR
