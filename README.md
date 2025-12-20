@@ -21,7 +21,8 @@
 6. **配置文件**：
    - config.json 用于加载和保存配置文件。
      
-<img width="378" height="377" alt="Pic1718" src="https://github.com/user-attachments/assets/40df29bb-3788-4628-b67a-1a60b02cca8b" /><img width="376" height="274" alt="Pic2602" src="https://github.com/user-attachments/assets/8dbaa3b1-1aa9-4bbc-a5a7-3a893e5bf9d6" />
+<img width="400" height="400" alt="1" src="https://github.com/user-attachments/assets/f62d13a6-e5fd-4986-b429-df5854c831d8" /><img width="360" height="330" alt="2" src="https://github.com/user-attachments/assets/3fb94587-7c77-43ae-87a8-2a716005164a" />
+
 
    **下载**： [蓝奏云](https://fuetsui.lanzouq.com/b0hccia0f)  密码：1212
 #### 问题反馈：
