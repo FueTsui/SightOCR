@@ -29,9 +29,9 @@
    **下载**： [蓝奏云](https://fuetsui.lanzouq.com/b0hccia0f)  密码：1212
 #### 摸鱼搭子：
 
-*qq群* [175332502](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=5PkXysHbDS-RVvXJO_AE7OkFEZrIaFYN&authKey=OZ7pUAm4Ek2ZUKmurSP5v2w9lcbQN2%2BnoiGdIJzM0ZT5QsFkrV0CICvkw9C7qIWS&noverify=0&group_code=175332502)	
+*QQ群*  [175332502](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=5PkXysHbDS-RVvXJO_AE7OkFEZrIaFYN&authKey=OZ7pUAm4Ek2ZUKmurSP5v2w9lcbQN2%2BnoiGdIJzM0ZT5QsFkrV0CICvkw9C7qIWS&noverify=0&group_code=175332502)	
 
-<img width="200" height="200" alt="pay" src="https://github.com/user-attachments/assets/c42d823d-3165-4129-ac8f-bdffacbdc1a6" />
+<img width="300" height="300" alt="pay" src="https://github.com/user-attachments/assets/c42d823d-3165-4129-ac8f-bdffacbdc1a6" />
 
 
 
