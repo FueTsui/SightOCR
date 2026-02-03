@@ -27,6 +27,8 @@
    **下载**： [蓝奏云](https://fuetsui.lanzouq.com/b0hccia0f)  密码：1212
 #### 问题反馈：
 
-*SightOCR通知群* [175332502](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=5PkXysHbDS-RVvXJO_AE7OkFEZrIaFYN&authKey=OZ7pUAm4Ek2ZUKmurSP5v2w9lcbQN2%2BnoiGdIJzM0ZT5QsFkrV0CICvkw9C7qIWS&noverify=0&group_code=175332502)	答案：SightOCR
+*摸鱼搭子* [175332502](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=5PkXysHbDS-RVvXJO_AE7OkFEZrIaFYN&authKey=OZ7pUAm4Ek2ZUKmurSP5v2w9lcbQN2%2BnoiGdIJzM0ZT5QsFkrV0CICvkw9C7qIWS&noverify=0&group_code=175332502)	答案：SightOCR
+
+![IMG_2230](https://github.com/user-attachments/assets/5f809655-b0f2-4081-98c7-1dffd10b1e7c)
 
 
