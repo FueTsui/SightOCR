@@ -21,14 +21,18 @@
 6. **配置文件**：
    - config.json 用于加载和保存配置文件。
      
-<img width="400" height="400" alt="1" src="https://github.com/user-attachments/assets/f62d13a6-e5fd-4986-b429-df5854c831d8" />
+<img width="338" height="359" alt="main" src="https://github.com/user-attachments/assets/eb3d5bb1-2858-47f1-9236-27bb3d1edbde" />
+
+
 
 
    **下载**： [蓝奏云](https://fuetsui.lanzouq.com/b0hccia0f)  密码：1212
-#### 问题反馈：
+#### 摸鱼搭子：
 
-*摸鱼搭子* [175332502](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=5PkXysHbDS-RVvXJO_AE7OkFEZrIaFYN&authKey=OZ7pUAm4Ek2ZUKmurSP5v2w9lcbQN2%2BnoiGdIJzM0ZT5QsFkrV0CICvkw9C7qIWS&noverify=0&group_code=175332502)	答案：SightOCR
+*qq群* [175332502](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=5PkXysHbDS-RVvXJO_AE7OkFEZrIaFYN&authKey=OZ7pUAm4Ek2ZUKmurSP5v2w9lcbQN2%2BnoiGdIJzM0ZT5QsFkrV0CICvkw9C7qIWS&noverify=0&group_code=175332502)	
 
-![IMG_2230](https://github.com/user-attachments/assets/5f809655-b0f2-4081-98c7-1dffd10b1e7c)
+<img width="200" height="200" alt="pay" src="[https://github.com/user-attachments/assets/f62d13a6-e5fd-4986-b429-df5854c831d8](https://github.com/user-attachments/assets/c42d823d-3165-4129-ac8f-bdffacbdc1a6)" />
+
+
 
 
