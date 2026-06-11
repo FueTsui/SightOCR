@@ -1,4 +1,3 @@
-
 <img width="200" height="200" alt="icon" src="https://github.com/user-attachments/assets/ddc06b51-cef5-4e16-a293-cb74df508bbe" />
 
 ### SightOCR 文字识别翻译
@@ -29,8 +28,9 @@
    - 开机启动开关、显示和隐藏系统托盘图标开关。
 6. **配置文件**：
    - config.json 用于加载和保存配置文件。
-     
-<img width="338" height="359" alt="main" src="https://github.com/user-attachments/assets/eb3d5bb1-2858-47f1-9236-27bb3d1edbde" />
+<img width="338" height="338" alt="Pic4210" src="https://github.com/user-attachments/assets/2e944eb5-c2f7-4d68-a506-7977ef0fe8d0" />
+   
+<img width="300" height="300" alt="pay" src="https://github.com/user-attachments/assets/c42d823d-3165-4129-ac8f-bdffacbdc1a6" />
 
 
 
@@ -39,7 +39,7 @@
    
    **摸鱼搭子**：*QQ群*  [175332502](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=5PkXysHbDS-RVvXJO_AE7OkFEZrIaFYN&authKey=OZ7pUAm4Ek2ZUKmurSP5v2w9lcbQN2%2BnoiGdIJzM0ZT5QsFkrV0CICvkw9C7qIWS&noverify=0&group_code=175332502)	
 
-<img width="300" height="300" alt="pay" src="https://github.com/user-attachments/assets/c42d823d-3165-4129-ac8f-bdffacbdc1a6" />
+
 
 
 
