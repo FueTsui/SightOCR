@@ -1787,6 +1787,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a stable interactive desktop frame; run on the release validation image"]
     fn native_rendering_paints_shaped_text_without_using_the_clipboard() {
         let parent = TestParent::new();
         let ctx = egui::Context::default();
