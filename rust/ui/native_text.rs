@@ -2208,6 +2208,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a stable interactive desktop frame; run on the release validation image"]
     fn native_popup_hole_preserves_text_and_restores_the_full_window_region() {
         use windows_sys::Win32::Graphics::Gdi::{GetWindowRgn, PtInRegion};
         let parent = TestParent::new();
