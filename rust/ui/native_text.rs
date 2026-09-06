@@ -1687,6 +1687,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the release validation Windows font stack and RichEdit behavior"]
     fn edited_scripts_preserve_caret_and_undo_while_receiving_correct_fonts() {
         let parent = TestParent::new();
         let ctx = egui::Context::default();

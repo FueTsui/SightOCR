@@ -4,6 +4,8 @@
 
 公开源码发布说明：OneOCR DLL/模型、真实业务表格样本及其派生 OCR 夹具只保留在本地验证工作区，不进入公开 Git 历史；公开仓库保留合成基础夹具和生产源码。下文出现的 `tests/样本`、`tests/fixtures/table-lines` 与 `target` 路径属于本地验证证据位置，不表示这些材料随源码发布。
 
+公开 CI 使用标准 Windows Runner，未安装可选的印地语、孟加拉语语言字体；两项“已安装系统字体覆盖”测试及一项依赖相同字体栈/RichEdit 行为的编辑测试因此标记为显式环境测试并默认忽略。应在发布验证镜像上分别通过 `cargo test --locked --bin SightOCR installed_windows_fonts_cover -- --ignored` 和 `cargo test --locked --bin SightOCR edited_scripts_preserve_caret -- --ignored` 单独运行。生产字体回退代码、纯逻辑字体测试及其他默认测试继续由 CI 执行。
+
 ## 2026-09-06 2.0.0 识别内容持续闪烁与滚轮滚动
 
 - 原生正文此前在每个主界面帧之后强制擦除并重绘全文，即使文字、字体和布局完全未变；同时重复发送只读状态消息。改为合并实际变化，仅在内容、样式、位置、可见性、菜单遮挡或输入变化后安排刷新，并缓存只读状态。单元测试覆盖连续 120 个不变帧没有额外原生刷新，状态变化各触发一次刷新。

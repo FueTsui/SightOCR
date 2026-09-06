@@ -166,6 +166,7 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    #[ignore = "requires optional Windows language fonts; run explicitly on the release validation image"]
     fn installed_windows_fonts_cover_every_configured_language() {
         let configured: Vec<_> = sightocr::config::LANGUAGES
             .iter()
@@ -200,6 +201,7 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
+    #[ignore = "requires optional Windows language fonts; run explicitly on the release validation image"]
     fn installed_windows_fonts_cover_additional_international_scripts() {
         // Automatic OCR can return scripts beyond the translation language menu.
         // These samples exercise the system fallback families as well, in source,

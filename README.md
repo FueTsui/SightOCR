@@ -98,7 +98,12 @@ Windows 截图识别与翻译工具，现采用 **Rust + egui + Win32** 重写�
 
 公开源码仓库不提交 OneOCR DLL/模型、真实业务表格样本及其派生 OCR 夹具。构建或运行前，请在本地准备 `resources/oneocr/oneocr.dll`、`onnxruntime.dll` 和 `oneocr.onemodel`；这些运行时文件已包含在官方安装包中。私有样本仅用于发布前本地回归，不是应用运行依赖。
 
+已安装 Windows 截图工具（`Microsoft.ScreenSketch`）时，可运行 `tests\ExtractOCR.bat`，经 UAC 确认后从本机应用包提取三项 OneOCR 文件到 `resources\oneocr`。脚本不联网，缺少任一文件会返回失败，并输出复制后文件的 SHA-256。请自行确认对本机组件的使用符合适用许可。
+
 ```powershell
+# 从本机 Windows 截图工具准备 OneOCR 运行时（需要 UAC 确认）
+.\tests\ExtractOCR.bat
+
 cargo run --locked --bin SightOCR
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
