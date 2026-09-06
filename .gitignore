@@ -1,0 +1,15 @@
+/target/
+/dist/
+/installer/
+__pycache__/
+*.pyc
+*.log
+/logs/
+/screenshots/
+/.venv/
+/paths.json
+/config.json
+/resources/oneocr/
+/tests/oneocr/
+/tests/样本/
+/tests/fixtures/table-lines/

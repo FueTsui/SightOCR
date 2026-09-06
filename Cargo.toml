@@ -1,0 +1,51 @@
+[package]
+name = "sightocr"
+version = "2.0.0"
+authors = ["FueTsui"]
+edition = "2021"
+rust-version = "1.88"
+description = "Windows screenshot OCR and translation, implemented in Rust"
+license = "MIT"
+build = "build.rs"
+
+[lib]
+path = "rust/lib.rs"
+
+[[bin]]
+name = "SightOCR"
+path = "rust/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+eframe = { version = "=0.31.1", default-features = false, features = ["default_fonts", "glow"] }
+hmac = "0.12"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
+libloading = "0.8"
+md-5 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "socks", "system-proxy"] }
+raw-window-handle = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm",
+  "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_Console",
+  "Win32_System_Registry", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_Storage_Xps",
+  "Win32_System_RemoteDesktop", "Win32_System_JobObjects", "Win32_Security", "Win32_Globalization",
+  "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_HiDpi", "Win32_UI_Shell",
+] }
+
+[build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
