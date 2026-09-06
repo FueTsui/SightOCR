@@ -2276,6 +2276,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a stable interactive desktop frame; run on the release validation image"]
     fn opening_a_popup_returns_keyboard_focus_without_changing_editor_selection() {
         let parent = TestParent::new();
         let ctx = egui::Context::default();
