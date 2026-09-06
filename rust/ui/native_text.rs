@@ -1821,6 +1821,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a stable interactive desktop frame; run on the release validation image"]
     fn multilingual_children_render_independently_at_nonzero_offsets() {
         let parent = TestParent::new();
         let ctx = egui::Context::default();
@@ -1902,6 +1903,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a stable interactive desktop frame; run on the release validation image"]
     fn complex_script_caret_positions_follow_native_shaping() {
         use windows_sys::Win32::Foundation::POINTL;
         fn caret(hwnd: HWND, index: isize) -> POINTL {
