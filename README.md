@@ -2,9 +2,13 @@
 
 Windows 截图识别与翻译工具，现采用 **Rust + egui + Win32** 重写，运行时不需要 Python、Qt、NumPy 或 OpenCV。
 
+CLI 与本地 stdio MCP 使用 `sightocr-cli.exe`，随安装包和便携目录一起提供。支持本地图片/表格识别、文字/文件/标准输入翻译和 JSON 输出，参见 [CLI 与 MCP 使用说明](docs/CLI_MCP.md)。
+
+原文和译文均可手动编辑：空白区点击后立即进入输入状态，清空文本后仍可继续输入。已修复拼音首字母输入后候选窗口立即关闭的问题；输入法组合期间保留临时文本和选区，选词提交后再更新正文格式。默认 Bing 翻译已支持授权页在可信 Bing HTTPS 站点间的地区跳转，并保持对应站点的会话。
+
 ## 运行
 
-运行 `dist\installer\SightOCR-Setup-2.0.0.exe` 安装；也可双击 `启动.bat`，或运行便携目录中的 `dist\SightOCR\SightOCR.exe`。本次多语言排版与即时取消修复按要求沿用 2.0.0 版本号，请通过 SHA256 区分同版本历史构建。从源码启动且尚未构建时，脚本会调用 Cargo 构建 Release。要求 Windows 10/11 x64。安装、升级和卸载说明见 [Windows 安装包](docs/INSTALLATION.md)。
+运行 `dist\installer\SightOCR-Setup-2.0.1.exe` 安装；也可双击 `启动.bat`，或运行便携目录中的 `dist\SightOCR\SightOCR.exe`。2.0.1 加固系统托盘生命周期，并包含 CLI/MCP、正文编辑、中文拼音组合输入与 Bing 地区跳转修复。从源码启动且尚未构建时，脚本会调用 Cargo 构建 Release。要求 Windows 10/11 x64。安装、升级和卸载说明见 [Windows 安装包](docs/INSTALLATION.md)。
 
 | 操作 | 功能 |
 | --- | --- |
@@ -96,14 +100,7 @@ Windows 截图识别与翻译工具，现采用 **Rust + egui + Win32** 重写�
 
 安装 [Rust MSVC 工具链](https://rust-lang.org/tools/install/) 与 [Visual Studio C++ Build Tools / Windows SDK](https://learn.microsoft.com/en-us/windows/dev-environment/rust/setup)。OneOCR 资源要求 Windows x64。提交的 `Cargo.lock` 固定依赖版本。
 
-公开源码仓库不提交 OneOCR DLL/模型、真实业务表格样本及其派生 OCR 夹具。构建或运行前，请在本地准备 `resources/oneocr/oneocr.dll`、`onnxruntime.dll` 和 `oneocr.onemodel`；这些运行时文件已包含在官方安装包中。私有样本仅用于发布前本地回归，不是应用运行依赖。
-
-已安装 Windows 截图工具（`Microsoft.ScreenSketch`）时，可运行 `tests\ExtractOCR.bat`，经 UAC 确认后从本机应用包提取三项 OneOCR 文件到 `resources\oneocr`。脚本不联网，缺少任一文件会返回失败，并输出复制后文件的 SHA-256。请自行确认对本机组件的使用符合适用许可。
-
 ```powershell
-# 从本机 Windows 截图工具准备 OneOCR 运行时（需要 UAC 确认）
-.\tests\ExtractOCR.bat
-
 cargo run --locked --bin SightOCR
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
@@ -118,7 +115,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-installer.ps
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Installer
 ```
 
-若 Cargo 未加入 PATH，可使用 `$env:USERPROFILE\.cargo\bin\cargo.exe`；脚本会自动寻找该位置。安装包按用户安装。图标、版本号和 DPI manifest 嵌入 EXE；用户配置不随包发布。更新入口打开 Releases 页面，停用旧版自动下载并执行安装包的流程。
+构建脚本串行运行测试，避免原生字体/焦点测试争用 Windows 桌面状态。缺少 Windows 补充字体的验证机可显式传入 `-SkipOptionalFontTests`，只排除两项广泛语言字形覆盖测试；默认不排除，使用该选项时须在验证记录标明字体边界。
+
+若 Cargo 未加入 PATH，可使用 `$env:USERPROFILE\.cargo\bin\cargo.exe`；脚本会自动寻找该位置。安装包按用户安装。图标、版本号和 DPI manifest 嵌入 EXE；用户配置不随包发布。关于页可检查、下载并验证更高的正式版本，随后自动安装。
+
+公开源码不包含 OneOCR DLL/模型或真实业务表格及派生夹具。可使用 `tests/ExtractOCR.bat` 从本机截图工具提取所需资源。公开 CI 运行默认测试；依赖补充字体和交互桌面的测试保持显式忽略，应在配置完整的 Windows 验证机上串行执行。
 
 ## 命令行
 
@@ -131,12 +132,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Installer
 & .\target\release\SightOCR.exe --translate 'Hello world' --from en --to zh-Hans --output .\translation.txt
 ```
 
-Release 为 GUI 子系统程序，批处理建议使用 `--output` 并等待进程结束。返回码 0 为成功，非 0 为失败。
+以上旧参数继续兼容。自动化推荐使用控制台程序：
+
+```powershell
+& .\dist\SightOCR\sightocr-cli.exe ocr .\tests\fixtures\basic.png --format json
+& .\dist\SightOCR\sightocr-cli.exe translate --input .\source.txt --to en --provider bing
+& .\dist\SightOCR\sightocr-cli.exe mcp
+```
+
+`sightocr-cli.exe` 支持标准输入输出及可靠的进程等待，返回码 0 为成功，非 0 为失败。`SightOCR.exe` Release 仍为 GUI 子系统，旧批处理建议使用 `--output` 并等待进程结束。MCP 客户端配置及完整参数见 [CLI 与 MCP](docs/CLI_MCP.md)。
 
 ## 结构
 
 ```text
 rust/main.rs       GUI / CLI 入口
+rust/cli.rs        共享命令行与无界面任务入口
+rust/mcp.rs        本地 stdio MCP 协议与工具
 rust/app.rs        应用状态、任务与系统事件
 rust/ui/           工作台、设置、主题与原生窗口样式
 rust/ui_smoke.rs   隔离配置的桌面界面冒烟验证
@@ -155,6 +166,6 @@ resources/oneocr/  原有 DLL 与模型
 
 重构问题清单和人工回归项目见 [重构记录](docs/RUST_REFACTOR.md)，实测结果见 [验证记录](docs/VALIDATION.md)。本地复杂合并/倾斜表格仍属于启发式恢复；多屏混合 DPI、远程桌面和云端账号权限需在目标环境验证。
 
-此前窗口缩放和截图时序修复继续保留。本次按 2.0.0 重新打包，24 个界面场景及表格、更新回归使用合成图片和响应验证，不采集桌面或调用云端 OCR。构建、安装包检查及 EXE 校验和以[验证记录](docs/VALIDATION.md)和 `dist/installer/VALIDATION.json` 为准，不能沿用同版本旧包结果。
+此前窗口缩放和截图时序修复继续保留。2.0.1 的托盘循环、窗口后台恢复、构建及安装验证以[验证记录](docs/VALIDATION.md)和发布附件 `VALIDATION.json` 为准；下载后可使用 `SHA256SUMS.txt` 核对安装包。
 
 SightOCR 第一方代码作者及版权归属为 FueTsui，采用 [MIT 许可](LICENSE)。现有 OneOCR DLL/模型及其他第三方组件保留各自的作者、版权和许可。

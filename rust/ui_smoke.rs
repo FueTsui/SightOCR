@@ -5,10 +5,16 @@
 
 #[path = "ui/capture_handoff_smoke.rs"]
 mod capture_handoff_smoke;
+#[path = "ui/editing_smoke.rs"]
+mod editing_smoke;
+#[path = "ui/ime_live_smoke.rs"]
+mod ime_live_smoke;
 #[path = "ui/live_display_smoke.rs"]
 mod live_display_smoke;
 #[path = "ui/text_stability_smoke.rs"]
 mod text_stability_smoke;
+#[path = "ui/tray_lifecycle_smoke.rs"]
+mod tray_lifecycle_smoke;
 #[path = "ui/wheel_smoke.rs"]
 mod wheel_smoke;
 
@@ -76,6 +82,7 @@ struct Report {
     native_language_changed_live: bool,
     text_stability: Vec<serde_json::Value>,
     wheel_scroll: Option<serde_json::Value>,
+    native_editing: Vec<String>,
     empty_screenshot: bool,
     empty_translate_screenshot: bool,
     settings_screenshot: bool,
@@ -151,6 +158,7 @@ enum Stage {
     NativeStress,
     NativeContent,
     NativeScrolling,
+    NativeEditing,
     Empty,
     EmptyTranslate,
     Settings,
@@ -201,6 +209,7 @@ pub(super) struct State {
     framebuffer_screenshot: Option<egui::ColorImage>,
     text_stability_run: Option<text_stability_smoke::Run>,
     wheel_run: Option<wheel_smoke::Run>,
+    editing_run: Option<editing_smoke::Run>,
     stability_redraws: [u64; 2],
     stability_first_frame: u64,
     stability_input_frames: u64,
@@ -214,6 +223,15 @@ pub(super) struct State {
 }
 
 pub fn run(directory: PathBuf) -> Result<()> {
+    if std::env::var("SIGHTOCR_SMOKE_UI_SCENARIO").as_deref() == Ok("tray") {
+        return tray_lifecycle_smoke::run(directory);
+    }
+    if std::env::var("SIGHTOCR_SMOKE_UI_SCENARIO").as_deref() == Ok("ime-live") {
+        return ime_live_smoke::run(directory);
+    }
+    if std::env::var("SIGHTOCR_SMOKE_UI_SCENARIO").as_deref() == Ok("editing") {
+        return editing_smoke::run(directory);
+    }
     std::fs::create_dir_all(&directory).context("无法创建 UI 冒烟测试输出目录")?;
     let directory = directory.canonicalize()?;
     // Keep test configuration outside every real user/app configuration directory.
@@ -290,6 +308,7 @@ pub fn run(directory: PathBuf) -> Result<()> {
                 framebuffer_screenshot: None,
                 text_stability_run: None,
                 wheel_run: None,
+                editing_run: None,
                 stability_redraws: [0; 2],
                 stability_first_frame: 0,
                 stability_input_frames: 0,
@@ -330,6 +349,9 @@ impl State {
     pub(super) fn append_input(&mut self, raw: &mut egui::RawInput) {
         raw.events.append(&mut self.queued_input);
         if let Some(run) = self.wheel_run.as_mut() {
+            run.append_input(raw);
+        }
+        if let Some(run) = self.editing_run.as_mut() {
             run.append_input(raw);
         }
     }
@@ -1123,6 +1145,29 @@ impl State {
                             return;
                         }
                     }
+                    self.advance(Stage::NativeEditing);
+                }
+            }
+            Stage::NativeEditing if self.stable() => {
+                if self.editing_run.is_none() {
+                    self.editing_run = Some(editing_smoke::Run::start(app, ctx));
+                }
+                if let Some(result) = self.editing_run.as_mut().unwrap().tick(app, ctx) {
+                    self.editing_run.take();
+                    match result {
+                        Ok(checks) => {
+                            self.report.lock().unwrap().native_editing =
+                                checks.into_iter().map(str::to_owned).collect();
+                        }
+                        Err(error) => {
+                            self.fail(
+                                app,
+                                ctx,
+                                format!("Native editing verification failed: {error:#}"),
+                            );
+                            return;
+                        }
+                    }
                     ctx.set_theme(egui::ThemePreference::Light);
                     ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(740.0, 680.0)));
                     app.source.clear();
@@ -1554,6 +1599,7 @@ impl State {
                     && report.native_language_changed_live
                     && report.text_stability.len() == 3
                     && report.wheel_scroll.is_some()
+                    && report.native_editing.len() == 6
                     && report.empty_screenshot
                     && report.empty_translate_screenshot
                     && report.settings_screenshot

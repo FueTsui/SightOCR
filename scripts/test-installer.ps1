@@ -34,6 +34,7 @@ function Test-InstallerShutdown {
     $csc = Join-Path $env:windir 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
     & $csc /nologo /target:winexe /reference:System.Windows.Forms.dll "/out:$fixtureExe" (Join-Path $PSScriptRoot 'installer/ShutdownFixture.cs')
     if ($LASTEXITCODE -ne 0) { throw 'Synthetic shutdown fixture compilation failed.' }
+    Copy-Item -LiteralPath $fixtureExe -Destination (Join-Path $fixturePackage 'sightocr-cli.exe')
     if (-not ('ShutdownFixture' -as [type])) { [Reflection.Assembly]::LoadFrom($fixtureExe) | Out-Null }
     foreach ($relative in @('README.md', 'LICENSE', 'docs/test.md', 'resources/oneocr/oneocr.dll', 'resources/oneocr/onnxruntime.dll', 'resources/oneocr/oneocr.onemodel')) {
         [IO.File]::WriteAllText((Join-Path $fixturePackage $relative), 'Synthetic installer fixture')
@@ -44,8 +45,8 @@ function Test-InstallerShutdown {
     $silentArguments = @('/SP-', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', '/TASKS=', '/LANG=chinesesimplified', ('/DIR="' + $fixtureInstall + '"'))
     Run-Hidden $fixtureInstaller $silentArguments
     Copy-Item -LiteralPath $fixtureExe -Destination (Join-Path $otherInstall 'SightOCR.exe')
-    function Start-Fixture([string]$Directory) {
-        $file = Join-Path $Directory 'SightOCR.exe'
+    function Start-Fixture([string]$Directory, [string]$Executable = 'SightOCR.exe') {
+        $file = Join-Path $Directory $Executable
         Assert-TestPath $file
         $process = Start-Process -FilePath $file -WindowStyle Hidden -PassThru
         $timer = [Diagnostics.Stopwatch]::StartNew()
@@ -59,7 +60,7 @@ function Test-InstallerShutdown {
     }
     function Stop-Fixture([string]$Directory) {
         Assert-TestPath $Directory
-        foreach ($process in (Get-Process SightOCR -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $Directory 'SightOCR.exe') })) {
+        foreach ($process in (Get-Process SightOCR,sightocr-cli -ErrorAction SilentlyContinue | Where-Object { $_.Path -in @((Join-Path $Directory 'SightOCR.exe'), (Join-Path $Directory 'sightocr-cli.exe')) })) {
             [ShutdownFixture]::RequestShutdown($process.Id)
             if (-not $process.WaitForExit(5000)) { $process.Kill(); $process.WaitForExit() }
         }
@@ -93,6 +94,10 @@ function Test-InstallerShutdown {
         if ((Run-WithDialogResponse 1) -ne 0 -or -not $running.WaitForExit(5000)) { throw 'Confirmed installation did not close the running app.' }
         $eventsFile = Join-Path $fixtureInstall 'events.log'
         if (-not [IO.File]::ReadAllText($eventsFile).Contains("graceful:$($running.Id)`n")) { throw 'Confirmed installation did not use graceful exit.' }
+        $console = Start-Fixture $fixtureInstall 'sightocr-cli.exe'
+        $consoleCancelled = Start-Process -FilePath $fixtureInstaller -ArgumentList $silentArguments -WindowStyle Hidden -PassThru
+        if (-not $consoleCancelled.WaitForExit(30000) -or $consoleCancelled.ExitCode -eq 0 -or $console.HasExited) { throw 'Unapproved silent install did not preserve the running CLI/MCP process.' }
+        if ((Run-WithDialogResponse 1) -ne 0 -or -not $console.WaitForExit(5000)) { throw 'Confirmed installation did not close the CLI/MCP process.' }
         # The compatibility path applies only to a fixture without the new marker.
         $legacyFlag = Join-Path $fixtureInstall 'legacy'
         [IO.File]::WriteAllText($legacyFlag, '')
@@ -148,7 +153,7 @@ $configText = '{"synthetic_install_test":true}'
 [IO.File]::WriteAllText($configSentinel, $configText)
 $isolatedConfig = Join-Path $testRoot 'runtime-config.json'
 [IO.File]::WriteAllText($isolatedConfig, '{}')
-$payload = @('SightOCR.exe', 'README.md', 'LICENSE', 'resources/oneocr/oneocr.dll', 'resources/oneocr/onnxruntime.dll', 'resources/oneocr/oneocr.onemodel')
+$payload = @('SightOCR.exe', 'sightocr-cli.exe', 'README.md', 'LICENSE', 'resources/oneocr/oneocr.dll', 'resources/oneocr/onnxruntime.dll', 'resources/oneocr/oneocr.onemodel')
 $payload += Get-ChildItem -LiteralPath (Join-Path $packageRoot 'docs') -Filter '*.md' | ForEach-Object { 'docs/' + $_.Name }
 $hashes = @{}
 foreach ($relative in $payload) {
@@ -171,6 +176,37 @@ for ($attempt = 1; $attempt -le 2; $attempt++) {
     $unexpected = Get-Process SightOCR -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $installRoot 'SightOCR.exe') }
     if ($unexpected) { throw 'Silent installation unexpectedly started SightOCR.' }
 }
+# Exercise the real console host, which has no GUI graceful-exit message.
+# Automatic update must fail promptly without closing it or replacing payload.
+$consoleStart = [Diagnostics.ProcessStartInfo]::new()
+$consoleStart.FileName = Join-Path $installRoot 'sightocr-cli.exe'
+$consoleStart.Arguments = 'mcp'
+$consoleStart.UseShellExecute = $false
+$consoleStart.CreateNoWindow = $true
+$consoleStart.RedirectStandardInput = $true
+$consoleStart.RedirectStandardOutput = $true
+$consoleStart.RedirectStandardError = $true
+$consoleStart.EnvironmentVariables['SIGHTOCR_CONFIG'] = $isolatedConfig
+Assert-TestPath $consoleStart.FileName
+$consoleHost = [Diagnostics.Process]::Start($consoleStart)
+try {
+    $consoleHost.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"installer-smoke","version":"1"},"capabilities":{}}}')
+    $consoleHost.StandardInput.Flush()
+    $ready = $consoleHost.StandardOutput.ReadLineAsync()
+    if (-not $ready.Wait(5000) -or -not ($ready.Result | ConvertFrom-Json).result.serverInfo) { throw 'Installed MCP host did not initialize.' }
+    $updateLog = Join-Path $testRoot 'update-active-mcp.log'
+    Assert-TestPath $installer
+    $blockedUpdate = Start-Process -FilePath $installer -ArgumentList ($installArguments + '/UPDATE' + ('/LOG="' + $updateLog + '"')) -WindowStyle Hidden -PassThru
+    if (-not $blockedUpdate.WaitForExit(10000)) { throw 'Update waited instead of promptly reporting the active MCP host.' }
+    if ($blockedUpdate.ExitCode -eq 0 -or $consoleHost.HasExited) { throw 'Update should preserve the active MCP host and fail before replacing files.' }
+    foreach ($relative in $payload) {
+        if ((Get-FileHash -LiteralPath (Join-Path $installRoot $relative) -Algorithm SHA256).Hash -ne $hashes[$relative]) { throw 'Blocked update modified the installed payload.' }
+    }
+} finally {
+    $consoleHost.StandardInput.Close()
+    if (-not $consoleHost.WaitForExit(5000)) { $consoleHost.Kill(); $consoleHost.WaitForExit() }
+    $consoleHost.Dispose()
+}
 $ocrOutput = Join-Path $testRoot 'ocr.tsv'
 $previousConfig = $env:SIGHTOCR_CONFIG
 $previousResources = $env:SIGHTOCR_RESOURCES
@@ -178,12 +214,16 @@ try {
     $env:SIGHTOCR_CONFIG = $isolatedConfig
     $env:SIGHTOCR_RESOURCES = Join-Path $installRoot 'resources/oneocr'
     Run-Hidden (Join-Path $installRoot 'SightOCR.exe') @('--ocr', ('"' + (Join-Path $projectRoot 'tests/fixtures/basic.png') + '"'), '--table', '--output', ('"' + $ocrOutput + '"'))
+    $cliOutput = Join-Path $testRoot 'cli-ocr.json'
+    Run-Hidden (Join-Path $installRoot 'sightocr-cli.exe') @('ocr', ('"' + (Join-Path $projectRoot 'tests/fixtures/basic.png') + '"'), '--table', '--format', 'json', '--output', ('"' + $cliOutput + '"'))
 } finally {
     $env:SIGHTOCR_CONFIG = $previousConfig
     $env:SIGHTOCR_RESOURCES = $previousResources
 }
 $ocr = [IO.File]::ReadAllText($ocrOutput)
 if (-not $ocr.Contains("Alpha`t100") -or -not $ocr.Contains("Beta`t200")) { throw 'Installed OneOCR resources did not produce the expected TSV.' }
+$cliOcr = [IO.File]::ReadAllText($cliOutput) | ConvertFrom-Json
+if ($cliOcr.provider -ne 'local' -or -not $cliOcr.text.Contains("Alpha`t100") -or -not $cliOcr.text.Contains("Beta`t200")) { throw 'Installed console CLI did not produce the expected local OCR JSON.' }
 $uninstaller = Join-Path $installRoot 'unins000.exe'
 Assert-TestPath $uninstaller
 Run-Hidden $uninstaller @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="' + (Join-Path $testRoot 'uninstall.log') + '"'))
@@ -205,6 +245,8 @@ if (Test-Path -LiteralPath $smokeRegistryPath) { throw 'Smoke uninstall registra
     NoUninstallRegistration = $true
     NoSilentLaunch = $true
     InstalledOneOcrTsv = $ocr
+    InstalledConsoleOcrJson = $true
+    ActiveMcpUpdateFailsPromptlyWithoutReplacement = $true
     ShutdownProtocol = 'shutdown/report.json'
     VariantLimit = 'Same payload and install/uninstall code; test variant excludes shortcuts and uninstall registration.'
 } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $testRoot 'report.json') -Encoding UTF8

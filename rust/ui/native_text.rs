@@ -8,6 +8,8 @@
 use super::theme::Palette;
 #[path = "native_font_runs.rs"]
 mod native_font_runs;
+#[path = "native_ime.rs"]
+mod native_ime;
 use anyhow::{ensure, Result};
 #[cfg(any(debug_assertions, test))]
 use eframe::egui::ColorImage;
@@ -48,10 +50,11 @@ use windows_sys::Win32::{
             IsWindow, IsWindowVisible, PostMessageW, SendMessageW, SetWindowLongW, SetWindowPos,
             ShowWindow, WindowFromPoint, ES_AUTOVSCROLL, ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN,
             GWL_STYLE, HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, WM_CHAR,
-            WM_CLEAR, WM_CUT, WM_HSCROLL, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_KEYDOWN,
-            WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_NCDESTROY,
-            WM_PAINT, WM_PASTE, WM_SETFOCUS, WM_UNDO, WM_USER, WM_VSCROLL, WS_CHILD,
-            WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_TABSTOP, WS_VSCROLL,
+            WM_CLEAR, WM_CUT, WM_HSCROLL, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+            WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONUP,
+            WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE,
+            WM_SETFOCUS, WM_UNDO, WM_USER, WM_VSCROLL, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+            WS_TABSTOP, WS_VSCROLL,
         },
     },
 };
@@ -89,6 +92,23 @@ const CFM_FACE: u32 = 0x2000_0000;
 const SUBCLASS_ID: usize = 0x534F_5458;
 const WHEEL_SUBCLASS_ID: usize = 0x534F_5748;
 const REDRAW_MESSAGE: u32 = 0x8000 + 0x533;
+const IME_NOTIFICATION_MESSAGE: u32 = 0x8000 + 0x535;
+const EN_STARTCOMPOSITION: u32 = 0x0713;
+const EN_ENDCOMPOSITION: u32 = 0x0714;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NotifyHeader {
+    hwnd_from: HWND,
+    id_from: usize,
+    code: u32,
+}
+
+#[repr(C, packed(4))]
+struct EndCompositionNotify {
+    header: NotifyHeader,
+    code: u32,
+}
 #[cfg(any(debug_assertions, test))]
 const SNAPSHOT_MESSAGE: u32 = 0x8000 + 0x534;
 
@@ -390,6 +410,31 @@ unsafe extern "system" fn wheel_parent_subclass(
     if message == WM_NCDESTROY {
         router.uninstall();
     }
+    if message == WM_NOTIFY && lparam != 0 {
+        // SAFETY: WM_NOTIFY supplies a synchronous NMHDR pointer. Only forward
+        // composition notifications from the two children registered with us.
+        // TSF-enabled RichEdit need not send the legacy WM_IME_* messages.
+        unsafe {
+            let header = std::ptr::read_unaligned(lparam as *const NotifyHeader);
+            if router.children.get().contains(&header.hwnd_from)
+                && !header.hwnd_from.is_null()
+                && matches!(header.code, EN_STARTCOMPOSITION | EN_ENDCOMPOSITION)
+            {
+                let detail = if header.code == EN_ENDCOMPOSITION {
+                    std::ptr::addr_of!((*(lparam as *const EndCompositionNotify)).code)
+                        .read_unaligned() as isize
+                } else {
+                    0
+                };
+                SendMessageW(
+                    header.hwnd_from,
+                    IME_NOTIFICATION_MESSAGE,
+                    header.code as usize,
+                    detail,
+                );
+            }
+        }
+    }
     if matches!(message, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
         if let Some(result) = router.forward(hwnd, message, wparam, lparam) {
             return result;
@@ -405,6 +450,13 @@ struct EditorWake {
     wheel_router: Rc<WheelRouter>,
     attached: Cell<bool>,
     text_event: Cell<bool>,
+    ime_composing: Cell<bool>,
+    #[cfg(any(debug_assertions, test))]
+    format_passes: Cell<u64>,
+    #[cfg(any(debug_assertions, test))]
+    ime_starts: Cell<u64>,
+    #[cfg(any(debug_assertions, test))]
+    ime_ends: Cell<u64>,
     redraw_pending: Cell<bool>,
     redraw_dirty: Cell<bool>,
     last_visible: Cell<bool>,
@@ -429,6 +481,23 @@ struct SnapshotKey {
 }
 
 impl EditorWake {
+    fn begin_composition(&self) {
+        #[cfg(any(debug_assertions, test))]
+        if !self.ime_composing.get() {
+            self.ime_starts.set(self.ime_starts.get().wrapping_add(1));
+        }
+        self.ime_composing.set(true);
+    }
+
+    fn end_composition(&self) {
+        #[cfg(any(debug_assertions, test))]
+        if self.ime_composing.get() {
+            self.ime_ends.set(self.ime_ends.get().wrapping_add(1));
+        }
+        self.ime_composing.set(false);
+        self.text_event.set(true);
+    }
+
     fn invalidate_rendering(&self) {
         self.redraw_dirty.set(true);
         #[cfg(any(debug_assertions, test))]
@@ -591,6 +660,22 @@ impl NativeEditors {
         focus: bool,
     ) -> Response {
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        self.show_at(index, ui, text, rect, enabled, focus || response.clicked());
+        response
+    }
+
+    /// Activate an already allocated empty-state body in the click's own frame.
+    /// Waiting until the next frame leaves keyboard input routed to egui while
+    /// the native editor is still hidden.
+    pub(super) fn show_at(
+        &mut self,
+        index: usize,
+        ui: &egui::Ui,
+        text: &str,
+        rect: Rect,
+        enabled: bool,
+        focus: bool,
+    ) {
         let editor = &mut self.editors[index];
         if editor.synced != text {
             editor.set_text(text);
@@ -600,10 +685,9 @@ impl NativeEditors {
             editor.requested = Some(Placement {
                 rect: clipped,
                 enabled,
-                focus: focus || response.clicked(),
+                focus,
             });
         }
-        response
     }
 
     pub(super) fn end_frame(&mut self, ctx: &egui::Context, hidden: bool) {
@@ -629,11 +713,35 @@ impl NativeEditors {
             // request cannot reclaim it; RichEdit retains its text and selection.
             self.blur();
         }
+        // eframe consumes PlatformOutput after this method. Tell it that the
+        // focused native child owns IME, otherwise an egui TextEdit -> RichEdit
+        // transition disables IME on all existing child windows on Windows.
+        for editor in &self.editors {
+            if editor.visible && !editor.read_only {
+                // SAFETY: Query only this UI thread's keyboard focus.
+                if unsafe { GetFocus() } == editor.hwnd {
+                    native_ime::restore_context_if_missing(editor.hwnd);
+                    native_ime::publish_ime_output(ctx, editor.wake.parent, editor.hwnd);
+                    break;
+                }
+            }
+        }
     }
 
     #[cfg(any(debug_assertions, test))]
     pub(super) fn popup_rects(&self) -> &[Rect] {
         &self.popup_rects
+    }
+
+    #[cfg(any(debug_assertions, test))]
+    pub(super) fn ime_state(&self, index: usize) -> (bool, u64, u64, u64) {
+        let wake = &self.editors[index].wake;
+        (
+            wake.ime_composing.get(),
+            wake.ime_starts.get(),
+            wake.ime_ends.get(),
+            wake.format_passes.get(),
+        )
     }
 
     #[cfg(any(debug_assertions, test))]
@@ -810,6 +918,13 @@ impl Editor {
             wheel_router,
             attached: Cell::new(false),
             text_event: Cell::new(false),
+            ime_composing: Cell::new(false),
+            #[cfg(any(debug_assertions, test))]
+            format_passes: Cell::new(0),
+            #[cfg(any(debug_assertions, test))]
+            ime_starts: Cell::new(0),
+            #[cfg(any(debug_assertions, test))]
+            ime_ends: Cell::new(0),
             redraw_pending: Cell::new(false),
             redraw_dirty: Cell::new(true),
             last_visible: Cell::new(false),
@@ -875,6 +990,10 @@ impl Editor {
             // TSF supports IME; disabling sequence filtering preserves OCR/pasted
             // Unicode, including combining marks supplied in their original order.
             SendMessageW(hwnd, EM_SETEDITSTYLE, 0x0001_0800, 0x0001_0800);
+            // RichEdit's TSF path reports composition through WM_NOTIFY rather
+            // than necessarily emitting legacy WM_IME_* messages to the child.
+            let events = SendMessageW(hwnd, WM_USER + 59, 0, 0); // EM_GETEVENTMASK
+            SendMessageW(hwnd, WM_USER + 69, 0, events | 0x3000_0000); // EM_SETEVENTMASK
         }
         editor.apply_style(
             editor.wake.ctx.pixels_per_point(),
@@ -885,6 +1004,8 @@ impl Editor {
     }
 
     fn set_text(&mut self, text: &str) {
+        // A deliberate new OCR/result document supersedes any pending preedit.
+        self.wake.ime_composing.set(false);
         self.wake.invalidate_rendering();
         let utf16: Vec<u16> = native_line_endings(text).encode_utf16().collect();
         // SAFETY: UTF-16 storage remains live for the synchronous stream callback;
@@ -919,6 +1040,13 @@ impl Editor {
     }
 
     fn format_document(&self, text: &str) {
+        if self.wake.ime_composing.get() {
+            return;
+        }
+        #[cfg(any(debug_assertions, test))]
+        self.wake
+            .format_passes
+            .set(self.wake.format_passes.get().wrapping_add(1));
         self.wake.invalidate_rendering();
         let _guard = FormatGuard::new(self.hwnd);
         // Rich text mode is needed for independent font/paragraph formats. Apply
@@ -964,6 +1092,13 @@ impl Editor {
     }
 
     fn sync_edits(&mut self, text: &mut String) {
+        // RichEdit owns the temporary composition string and selection. Moving
+        // its selection to apply font runs would commit/cancel the first Latin
+        // preedit character, closing the IME before a candidate can be chosen.
+        // Keep dirty/event flags until END; expose only committed text to Rust.
+        if self.wake.ime_composing.get() {
+            return;
+        }
         // SAFETY: A read-only message to this thread's owned RichEdit child.
         let modified = unsafe { SendMessageW(self.hwnd, EM_GETMODIFY, 0, 0) != 0 };
         if modified || self.wake.text_event.replace(false) {
@@ -983,6 +1118,11 @@ impl Editor {
     }
 
     fn apply_style(&mut self, pixels_per_point: f32, enabled: bool, p: &Palette) {
+        // Theme/DPI changes may arrive between IME messages. Defer selection and
+        // character-format mutations until composition commits or is cancelled.
+        if self.wake.ime_composing.get() {
+            return;
+        }
         // SAFETY: This query reads the DPI of our own live child.
         let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32;
         let height = (15.0 * pixels_per_point * 1440.0 / dpi).round() as i32;
@@ -1192,6 +1332,25 @@ unsafe extern "system" fn editor_subclass(
         Rc::increment_strong_count(reference as *const EditorWake);
         Rc::from_raw(reference as *const EditorWake)
     };
+    if message == WM_IME_STARTCOMPOSITION || (message == WM_IME_COMPOSITION && lparam & 0x0008 != 0)
+    {
+        // Mark before native dispatch: RichEdit/TSF may reenter the message loop.
+        state.begin_composition();
+    }
+    if message == IME_NOTIFICATION_MESSAGE {
+        if wparam == EN_STARTCOMPOSITION as usize {
+            state.begin_composition();
+        } else if wparam == EN_ENDCOMPOSITION as usize && lparam & 1 != 0 {
+            // ECN_NEWTEXT alone is an update inside the existing composition.
+            state.end_composition();
+        }
+        state.invalidate_rendering();
+        let _ = catch_unwind(AssertUnwindSafe(|| state.ctx.request_repaint()));
+        return 0;
+    }
+    if message == WM_SETFOCUS {
+        native_ime::restore_context_if_missing(hwnd);
+    }
     let wheel = matches!(message, WM_MOUSEWHEEL | WM_MOUSEHWHEEL);
     if wheel {
         if let Some(result) = state.wheel_router.forward(hwnd, message, wparam, lparam) {
@@ -1250,6 +1409,10 @@ unsafe extern "system" fn editor_subclass(
         }
     };
     drop(wheel_guard);
+    if matches!(message, WM_IME_ENDCOMPOSITION | WM_KILLFOCUS) {
+        // Default processing must finish its commit/cancel before model sync.
+        state.end_composition();
+    }
     if matches!(
         message,
         WM_CHAR | WM_CUT | WM_PASTE | WM_CLEAR | WM_UNDO | 0x00C7 | 0x0454 | WM_IME_ENDCOMPOSITION
@@ -1269,6 +1432,7 @@ unsafe extern "system" fn editor_subclass(
             | WM_CLEAR
             | WM_UNDO
             | WM_IME_COMPOSITION
+            | WM_IME_STARTCOMPOSITION
             | WM_IME_ENDCOMPOSITION
             | WM_SETFOCUS
             | WM_KILLFOCUS
@@ -1567,6 +1731,193 @@ mod tests {
     }
 
     #[test]
+    fn ime_preedit_does_not_change_model_selection_or_format_until_commit() {
+        let parent = TestParent::new();
+        let ctx = egui::Context::default();
+        let mut editors = NativeEditors::new(parent.0 as usize, ctx.clone()).unwrap();
+        for editor in &mut editors.editors {
+            let mut model = "prefix ".to_owned();
+            editor.set_text(&model);
+            let count = editor.wake.format_passes.get();
+            let original_style = editor.style;
+            // SAFETY: Model an IME-owned provisional span in this hidden test
+            // control. No desktop key injection or system clipboard is used.
+            unsafe {
+                SendMessageW(editor.hwnd, 0x00B1, 7, 7);
+                SendMessageW(editor.hwnd, WM_IME_STARTCOMPOSITION, 0, 0);
+                SendMessageW(editor.hwnd, 0x00C2, 1, wide("ni").as_ptr() as isize);
+            }
+            assert!(editor.wake.ime_composing.get());
+            let mut before = [0i32; 2];
+            // SAFETY: Read the owned control's UTF-16 selection into local storage.
+            unsafe { SendMessageW(editor.hwnd, WM_USER + 52, 0, before.as_mut_ptr() as isize) };
+            for _ in 0..12 {
+                editor.sync_edits(&mut model);
+                editor.apply_style(2.0, false, &Palette::get(&ctx));
+            }
+            let mut after = [0i32; 2];
+            // SAFETY: Read only the test control's selection and modification bit.
+            unsafe { SendMessageW(editor.hwnd, WM_USER + 52, 0, after.as_mut_ptr() as isize) };
+            assert_eq!(model, "prefix ");
+            assert_eq!(editor.synced, "prefix ");
+            assert_eq!(after, before);
+            assert_eq!(editor.wake.format_passes.get(), count);
+            assert_eq!(editor.style, original_style);
+            // SAFETY: Replace only the synthetic provisional span, then deliver
+            // the same end notification that follows a native IME commit.
+            unsafe {
+                SendMessageW(editor.hwnd, 0x00B1, 7, 9);
+                SendMessageW(editor.hwnd, 0x00C2, 1, wide("你好").as_ptr() as isize);
+                SendMessageW(editor.hwnd, WM_IME_ENDCOMPOSITION, 0, 0);
+            }
+            editor.sync_edits(&mut model);
+            assert_eq!(model, "prefix 你好");
+            assert_eq!(editor.wake.format_passes.get(), count + 1);
+            assert!(!editor.wake.ime_composing.get());
+        }
+    }
+
+    #[test]
+    fn ime_cancel_and_new_results_do_not_publish_provisional_text() {
+        let parent = TestParent::new();
+        let mut editors = NativeEditors::new(parent.0 as usize, egui::Context::default()).unwrap();
+        for editor in &mut editors.editors {
+            let mut model = "stable".to_owned();
+            editor.set_text(&model);
+            // SAFETY: Synthetic composition and cancellation target our control.
+            unsafe {
+                SendMessageW(editor.hwnd, 0x00B1, 6, 6);
+                SendMessageW(editor.hwnd, WM_IME_STARTCOMPOSITION, 0, 0);
+                SendMessageW(editor.hwnd, 0x00C2, 1, wide("n").as_ptr() as isize);
+            }
+            editor.sync_edits(&mut model);
+            assert_eq!(model, "stable");
+            // SAFETY: Remove the provisional span before IME end/cancel.
+            unsafe {
+                SendMessageW(editor.hwnd, 0x00B1, 6, 7);
+                SendMessageW(editor.hwnd, WM_CLEAR, 0, 0);
+                SendMessageW(editor.hwnd, WM_IME_ENDCOMPOSITION, 0, 0);
+            }
+            editor.sync_edits(&mut model);
+            assert_eq!(model, "stable");
+            // A newer worker result still wins over an outstanding edit.
+            // SAFETY: Begin composition in this owned hidden fixture.
+            unsafe { SendMessageW(editor.hwnd, WM_IME_STARTCOMPOSITION, 0, 0) };
+            model = "new OCR".into();
+            editor.set_text(&model);
+            // SAFETY: A late end notification must not restore old preedit text.
+            unsafe { SendMessageW(editor.hwnd, WM_IME_ENDCOMPOSITION, 0, 0) };
+            editor.sync_edits(&mut model);
+            assert_eq!(model, "new OCR");
+        }
+    }
+
+    #[test]
+    fn ime_context_recovers_from_host_disable_and_remains_attached_across_frames() {
+        use windows_sys::Win32::UI::Input::Ime::{
+            ImmAssociateContextEx, ImmGetContext, ImmReleaseContext, IACE_CHILDREN,
+        };
+        let parent = TestParent::new();
+        let ctx = egui::Context::default();
+        let mut editors = NativeEditors::new(parent.0 as usize, ctx.clone()).unwrap();
+        let placement = Placement {
+            rect: Rect::from_min_size(egui::pos2(30.0, 45.0), egui::vec2(320.0, 200.0)),
+            enabled: true,
+            focus: true,
+        };
+        for index in 0..2 {
+            let hwnd = editors.editors[index].hwnd;
+            editors.editors[index].place(placement, 1.0, &Palette::get(&ctx));
+            // SAFETY: Reproduce winit's IME disable path on our own fixture only.
+            unsafe {
+                ImmAssociateContextEx(parent.0, null_mut(), IACE_CHILDREN);
+                assert!(ImmGetContext(hwnd).is_null());
+            }
+            for _ in 0..6 {
+                editors.editors[index].requested = Some(placement);
+                editors.end_frame(&ctx, false);
+                assert!(ctx.output(|output| output.ime.is_some()));
+                // SAFETY: The acquired context belongs to our focused fixture.
+                unsafe {
+                    let context = ImmGetContext(hwnd);
+                    assert!(!context.is_null());
+                    ImmReleaseContext(hwnd, context);
+                }
+            }
+            let state = editors.ime_state(index);
+            assert!(!state.0);
+            assert_eq!(state.1, 0);
+        }
+    }
+
+    #[test]
+    fn tsf_notifications_guard_only_their_editor_until_composition_actually_ends() {
+        let parent = TestParent::new();
+        let mut editors = NativeEditors::new(parent.0 as usize, egui::Context::default()).unwrap();
+        for index in 0..2 {
+            let hwnd = editors.editors[index].hwnd;
+            let mut model = String::new();
+            let mut event = EndCompositionNotify {
+                header: NotifyHeader {
+                    hwnd_from: hwnd,
+                    id_from: 0x5340 + index,
+                    code: EN_STARTCOMPOSITION,
+                },
+                code: 0,
+            };
+            // SAFETY: Send real-shaped TSF notifications through our test parent;
+            // Windows/RichEdit, not egui, owns the provisional document text.
+            unsafe {
+                SendMessageW(
+                    parent.0,
+                    WM_NOTIFY,
+                    event.header.id_from,
+                    &event as *const _ as isize,
+                );
+                SendMessageW(hwnd, 0x00C2, 1, wide("ni").as_ptr() as isize);
+            }
+            let count = editors.editors[index].wake.format_passes.get();
+            editors.editors[index].sync_edits(&mut model);
+            assert!(model.is_empty());
+            assert!(editors.ime_state(index).0);
+            assert!(!editors.ime_state(1 - index).0);
+            event.header.code = EN_ENDCOMPOSITION;
+            event.code = 2; // ECN_NEWTEXT is not ECN_ENDCOMPOSITION.
+                            // SAFETY: The synchronous notification points to a live SDK layout.
+            unsafe {
+                SendMessageW(
+                    parent.0,
+                    WM_NOTIFY,
+                    event.header.id_from,
+                    &event as *const _ as isize,
+                )
+            };
+            editors.editors[index].sync_edits(&mut model);
+            assert!(editors.ime_state(index).0);
+            assert!(model.is_empty());
+            assert_eq!(editors.ime_state(index).3, count);
+            event.code = 1;
+            // SAFETY: Commit the provisional text, then notify only its owner.
+            unsafe {
+                SendMessageW(hwnd, 0x00B1, 0, -1);
+                SendMessageW(hwnd, 0x00C2, 1, wide("你").as_ptr() as isize);
+                SendMessageW(
+                    parent.0,
+                    WM_NOTIFY,
+                    event.header.id_from,
+                    &event as *const _ as isize,
+                );
+            }
+            editors.editors[index].sync_edits(&mut model);
+            assert_eq!(model, "你");
+            assert!(!editors.ime_state(index).0);
+            assert_eq!(editors.ime_state(index).1, 1);
+            assert_eq!(editors.ime_state(index).2, 1);
+            assert_eq!(editors.ime_state(index).3, count + 1);
+        }
+    }
+
+    #[test]
     fn unicode_results_roundtrip_without_reordering_or_normalization() {
         let parent = TestParent::new();
         let mut editors = NativeEditors::new(parent.0 as usize, egui::Context::default()).unwrap();
@@ -1584,6 +1935,85 @@ mod tests {
         for text in samples {
             editors.editors[0].set_text(text);
             assert_eq!(read_text(editors.editors[0].hwnd).as_deref(), Some(text));
+        }
+    }
+
+    #[test]
+    fn keyboard_characters_edit_both_result_models() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PeekMessageW, PM_REMOVE, WM_LBUTTONDOWN,
+        };
+
+        let parent = TestParent::new();
+        let ctx = egui::Context::default();
+        let mut editors = NativeEditors::new(parent.0 as usize, ctx.clone()).unwrap();
+        let mut models = [String::new(), String::new()];
+        for (index, model) in models.iter_mut().enumerate() {
+            let editor = &mut editors.editors[index];
+            editor.place(
+                Placement {
+                    rect: Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(300.0, 200.0)),
+                    enabled: true,
+                    focus: true,
+                },
+                1.0,
+                &Palette::get(&ctx),
+            );
+            // SAFETY: Input and message dispatch are restricted to this fixture's
+            // native control; no global input or clipboard is touched.
+            unsafe {
+                SendMessageW(editor.hwnd, WM_LBUTTONDOWN, 1, 8 | (8 << 16));
+                SendMessageW(editor.hwnd, WM_LBUTTONUP, 0, 8 | (8 << 16));
+                for character in "Manual 原文译文".encode_utf16() {
+                    PostMessageW(editor.hwnd, WM_CHAR, character as usize, 1);
+                }
+                let mut message = zeroed();
+                while PeekMessageW(&mut message, editor.hwnd, WM_CHAR, WM_CHAR, PM_REMOVE) != 0 {
+                    DispatchMessageW(&message);
+                }
+            }
+            editor.sync_edits(model);
+            assert_eq!(model, "Manual 原文译文", "editor {index}");
+        }
+    }
+
+    #[test]
+    fn busy_readonly_clears_before_keyboard_input_resumes_in_both_editors() {
+        let parent = TestParent::new();
+        let ctx = egui::Context::default();
+        let mut editors = NativeEditors::new(parent.0 as usize, ctx.clone()).unwrap();
+        for editor in &mut editors.editors {
+            let mut text = String::from("existing");
+            editor.set_text(&text);
+            let mut placement = Placement {
+                rect: Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(300.0, 200.0)),
+                enabled: false,
+                focus: false,
+            };
+            editor.place(placement, 1.0, &Palette::get(&ctx));
+            // SAFETY: Attempt native keyboard input only in this owned fixture.
+            unsafe { SendMessageW(editor.hwnd, WM_CHAR, b'X' as usize, 1) };
+            editor.sync_edits(&mut text);
+            assert_eq!(text, "existing");
+
+            placement.enabled = true;
+            placement.focus = true;
+            editor.place(placement, 1.0, &Palette::get(&ctx));
+            // SAFETY: Send an ordinary character after the job returns to idle.
+            unsafe { SendMessageW(editor.hwnd, WM_CHAR, b'X' as usize, 1) };
+            editor.sync_edits(&mut text);
+            assert_eq!(text, "Xexisting");
+
+            // Exercise the Unicode selection insertion used by native text paste,
+            // without changing or reading the user's system clipboard contents.
+            let pasted = wide("粘贴\rالعربية 😀");
+            // SAFETY: Replace this fixture's selection with stack-owned UTF-16.
+            unsafe {
+                SendMessageW(editor.hwnd, 0x00B1, 0, -1);
+                SendMessageW(editor.hwnd, 0x00C2, 1, pasted.as_ptr() as isize);
+            }
+            editor.sync_edits(&mut text);
+            assert_eq!(text, "粘贴\nالعربية 😀");
         }
     }
 

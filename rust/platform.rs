@@ -743,6 +743,7 @@ struct PlatformState {
     hotkeys: RegisteredHotkeys,
     icon: TrayIcon,
     tray_visible: bool,
+    menu_open: bool,
     visibility: Arc<AtomicBool>,
     taskbar_created: u32,
 }
@@ -863,6 +864,7 @@ fn run_platform(
         hotkeys: RegisteredHotkeys::default(),
         icon: TrayIcon::load(),
         tray_visible: false,
+        menu_open: false,
         visibility,
         // SAFETY: This synchronous call copies the null-terminated registered message name.
         taskbar_created: unsafe { RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()) },
@@ -1001,6 +1003,12 @@ unsafe fn platform_dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LP
                     let _ = (*pointer).sender.send(PlatformEvent::Show);
                 }
                 WM_RBUTTONUP | WM_CONTEXTMENU => {
+                    // TrackPopupMenu dispatches messages synchronously. A second tray
+                    // callback during that loop must not start another native menu.
+                    if (*pointer).menu_open {
+                        return 0;
+                    }
+                    (*pointer).menu_open = true;
                     // The native menu runs a nested message loop. Copy the committed labels
                     // before entering it, so no borrow of state crosses reentrant updates.
                     let labels = (*pointer).hotkeys.labels.clone();
@@ -1008,6 +1016,13 @@ unsafe fn platform_dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LP
                         Ok(selected) => tray_command(selected),
                         Err(error) => Some(PlatformEvent::Error(error.to_string())),
                     };
+                    (*pointer).menu_open = false;
+                    // Shutdown may destroy the owner in the nested menu loop. The boxed
+                    // state stays alive until this callback returns, but its endpoint is
+                    // already gone, so no stale selection may reach the application.
+                    if GetWindowLongPtrW(hwnd, GWLP_USERDATA) != pointer as isize {
+                        return 0;
+                    }
                     if let Some(event) = event {
                         let _ = (*pointer).sender.send(event);
                     }
@@ -1017,6 +1032,9 @@ unsafe fn platform_dispatch(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LP
             0
         }
         WM_CLOSE => {
+            if (*pointer).menu_open {
+                EndMenu();
+            }
             DestroyWindow(hwnd);
             0
         }
@@ -1114,23 +1132,71 @@ fn tray_menu(hwnd: HWND, labels: &[String; 3]) -> Result<i32> {
     if unsafe { GetCursorPos(&mut point) } == 0 {
         return Err(win_error("读取托盘菜单位置失败"));
     }
+    Ok(track_tray_menu(hwnd, &menu, point))
+}
+
+fn track_tray_menu(hwnd: HWND, menu: &TrayMenu, point: POINT) -> i32 {
+    let parameters = TPMPARAMS {
+        cbSize: size_of::<TPMPARAMS>() as u32,
+        rcExclude: tray_menu_exclusion(hwnd, point),
+    };
     // SAFETY: hwnd is the live platform window on this thread. Tracking borrows the owned
-    // menu synchronously; scalar WM_NULL restores normal dismissal behavior afterward.
-    let selection = unsafe {
+    // menu and exclusion rectangle synchronously; scalar WM_NULL restores normal
+    // dismissal behavior afterward. Keeping the icon clear prevents a repeated tray
+    // click from hitting the last menu item when Windows moves the menu upward.
+    unsafe {
         SetForegroundWindow(hwnd);
-        let selected = TrackPopupMenu(
+        let selected = TrackPopupMenuEx(
             menu.0,
-            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_VERTICAL,
             point.x,
             point.y,
-            0,
             hwnd,
-            null(),
+            &parameters,
         );
         PostMessageW(hwnd, WM_NULL, 0, 0);
         selected
+    }
+}
+
+fn tray_menu_exclusion(hwnd: HWND, point: POINT) -> RECT {
+    let identifier = NOTIFYICONIDENTIFIER {
+        cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        // SAFETY: An all-zero GUID selects identification by HWND and icon ID.
+        ..unsafe { zeroed() }
     };
-    Ok(selection)
+    // SAFETY: RECT is POD and the shell initializes this caller-owned output.
+    let mut rectangle: RECT = unsafe { zeroed() };
+    // SAFETY: Both structures are live for the synchronous query; the HWND/ID pair
+    // identifies only our tray icon, including when it is in the overflow panel.
+    let located = unsafe { Shell_NotifyIconGetRect(&identifier, &mut rectangle) } == 0
+        && rectangle.right > rectangle.left
+        && rectangle.bottom > rectangle.top;
+    if !located {
+        // Explorer may be recreating the icon, or it may be hidden. Reserve an
+        // icon-sized click area even when its exact shell rectangle is unavailable.
+        // SAFETY: GetSystemMetrics only reads the current small-icon dimensions.
+        let (half_width, half_height) = unsafe {
+            (
+                GetSystemMetrics(SM_CXSMICON).max(16) / 2,
+                GetSystemMetrics(SM_CYSMICON).max(16) / 2,
+            )
+        };
+        rectangle = RECT {
+            left: point.x.saturating_sub(half_width),
+            top: point.y.saturating_sub(half_height),
+            right: point.x.saturating_add(half_width),
+            bottom: point.y.saturating_add(half_height),
+        };
+    }
+    // Leave a small border so rounding at mixed-DPI taskbar edges is harmless.
+    rectangle.left = rectangle.left.saturating_sub(2);
+    rectangle.top = rectangle.top.saturating_sub(2);
+    rectangle.right = rectangle.right.saturating_add(2);
+    rectangle.bottom = rectangle.bottom.saturating_add(2);
+    rectangle
 }
 
 struct ScreenDc(HDC);

@@ -5,6 +5,212 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThreadId, GetGuiResources, GR_GDIOBJECTS, GR_USEROBJECTS,
 };
 
+/// Exercises the production callback without a shell icon or global hotkeys.
+struct NativePlatformWindow {
+    hwnd: HWND,
+    _state: Box<PlatformState>,
+    events: mpsc::Receiver<PlatformEvent>,
+    _commands: mpsc::Sender<Update>,
+}
+
+impl NativePlatformWindow {
+    fn new(class: &str, procedure: WNDPROC) -> Result<Self> {
+        register_class(class, procedure, false)?;
+        let (sender, events) = mpsc::channel();
+        let (commands, receiver) = mpsc::channel();
+        let mut state = Box::new(PlatformState {
+            sender,
+            commands: receiver,
+            hotkeys: RegisteredHotkeys::default(),
+            icon: TrayIcon::load(),
+            tray_visible: false,
+            menu_open: false,
+            visibility: Arc::new(AtomicBool::new(false)),
+            taskbar_created: 0,
+        });
+        // SAFETY: The boxed production state stays at a stable address until after
+        // this hidden, test-owned window and all synchronous callbacks are gone.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                wide(class).as_ptr(),
+                wide("SightOCR native tray lifecycle test").as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                (&mut *state as *mut PlatformState).cast(),
+            )
+        };
+        if hwnd.is_null() {
+            return Err(win_error("创建托盘生命周期测试窗口失败"));
+        }
+        Ok(Self {
+            hwnd,
+            _state: state,
+            events,
+            _commands: commands,
+        })
+    }
+}
+
+impl Drop for NativePlatformWindow {
+    fn drop(&mut self) {
+        // SAFETY: Only the current test thread's owned HWND and WM_QUIT are touched.
+        // Clear its production shutdown message before the test runner reuses this thread.
+        unsafe {
+            if IsWindow(self.hwnd) != 0 {
+                DestroyWindow(self.hwnd);
+            }
+            let mut message: MSG = zeroed();
+            PeekMessageW(&mut message, null_mut(), WM_QUIT, WM_QUIT, PM_REMOVE);
+        }
+    }
+}
+
+#[test]
+fn native_repeated_tray_activation_never_exits_or_destroys_its_owner() -> Result<()> {
+    let fixture =
+        NativePlatformWindow::new("SightOCR.NativeTrayActivationTest", Some(platform_proc))?;
+    for _ in 0..100 {
+        for message in [WM_LBUTTONUP, WM_LBUTTONDBLCLK] {
+            // SAFETY: Scalar shell notifications go synchronously to this test's
+            // hidden platform window; no actual desktop input or shell icon is used.
+            unsafe { SendMessageW(fixture.hwnd, WM_TRAY, 1, message as LPARAM) };
+            assert_eq!(fixture.events.try_recv()?, PlatformEvent::Show);
+            // SAFETY: IsWindow only queries the test-owned handle.
+            assert_ne!(unsafe { IsWindow(fixture.hwnd) }, 0);
+        }
+    }
+    assert!(matches!(
+        fixture.events.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    Ok(())
+}
+
+const WM_TEST_MENU_SHUTDOWN: u32 = WM_APP + 100;
+thread_local! {
+    static TEST_POPUP_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_POPUP_HANDLE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_EXIT_RECT: std::cell::Cell<RECT> = const {
+        std::cell::Cell::new(RECT { left: 0, top: 0, right: 0, bottom: 0 })
+    };
+}
+
+unsafe extern "system" fn native_menu_geometry_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match message {
+        WM_INITMENUPOPUP => TEST_POPUP_HANDLE.with(|handle| handle.set(wparam)),
+        WM_ENTERIDLE => {
+            let menu = TEST_POPUP_HANDLE.with(std::cell::Cell::get) as HMENU;
+            let mut rect: RECT = zeroed();
+            if GetMenuItemRect(hwnd, menu, 6, &mut rect) != 0 {
+                TEST_EXIT_RECT.with(|current| current.set(rect));
+            }
+            EndMenu();
+            return 0;
+        }
+        _ => {}
+    }
+    platform_proc(hwnd, message, wparam, lparam)
+}
+
+#[test]
+#[ignore = "briefly opens and closes a popup at the primary monitor edge; run explicitly on an interactive Windows desktop"]
+fn native_tray_popup_keeps_exit_away_from_the_tray_click_area() -> Result<()> {
+    let fixture = NativePlatformWindow::new(
+        "SightOCR.NativeTrayPopupGeometryTest",
+        Some(native_menu_geometry_proc),
+    )?;
+    let menu = TrayMenu::new(&["F5".into(), "F2".into(), "F4".into()])?;
+    // SAFETY: The metrics only read the dimensions of the primary monitor. No
+    // desktop input is synthesized and the cursor itself is never moved.
+    let point = unsafe {
+        POINT {
+            x: GetSystemMetrics(SM_CXSCREEN) - 20,
+            y: GetSystemMetrics(SM_CYSCREEN) - 20,
+        }
+    };
+    assert_eq!(track_tray_menu(fixture.hwnd, &menu, point), 0);
+    let exit = TEST_EXIT_RECT.with(std::cell::Cell::get);
+    assert!(exit.right > exit.left && exit.bottom > exit.top);
+    assert!(
+        exit.right <= point.x - 8
+            || exit.left >= point.x + 8
+            || exit.bottom <= point.y - 8
+            || exit.top >= point.y + 8,
+        "exit item ({}, {}, {}, {}) overlaps tray click area around ({}, {})",
+        exit.left,
+        exit.top,
+        exit.right,
+        exit.bottom,
+        point.x,
+        point.y
+    );
+    Ok(())
+}
+
+unsafe extern "system" fn native_menu_shutdown_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match message {
+        WM_INITMENUPOPUP => {
+            TEST_POPUP_COUNT.with(|count| count.set(count.get() + 1));
+            TEST_POPUP_HANDLE.with(|handle| handle.set(wparam));
+            // Queue shutdown inside the real TrackPopupMenu modal loop.
+            PostMessageW(hwnd, WM_TEST_MENU_SHUTDOWN, 0, 0);
+        }
+        WM_TEST_MENU_SHUTDOWN => {
+            // These nested callbacks must not open another menu or emit an action.
+            SendMessageW(hwnd, WM_TRAY, 1, WM_RBUTTONUP as LPARAM);
+            SendMessageW(hwnd, WM_TRAY, 1, WM_CONTEXTMENU as LPARAM);
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+            return 0;
+        }
+        _ => {}
+    }
+    platform_proc(hwnd, message, wparam, lparam)
+}
+
+#[test]
+#[ignore = "briefly opens and closes its own native popup; run explicitly on an interactive Windows desktop"]
+fn native_tray_popup_reentry_and_shutdown_release_menu_without_an_action() -> Result<()> {
+    TEST_POPUP_COUNT.with(|count| count.set(0));
+    TEST_POPUP_HANDLE.with(|handle| handle.set(0));
+    let fixture = NativePlatformWindow::new(
+        "SightOCR.NativeTrayPopupShutdownTest",
+        Some(native_menu_shutdown_proc),
+    )?;
+    // SAFETY: Sends a synthetic tray notification only to the owned fixture window;
+    // the test callback queues its own close as soon as the popup initializes.
+    unsafe { SendMessageW(fixture.hwnd, WM_TRAY, 1, WM_RBUTTONUP as LPARAM) };
+    assert_eq!(TEST_POPUP_COUNT.with(std::cell::Cell::get), 1);
+    let menu = TEST_POPUP_HANDLE.with(std::cell::Cell::get) as HMENU;
+    assert!(!menu.is_null(), "the native popup was never initialized");
+    // SAFETY: These APIs support querying released opaque Win32 handles.
+    unsafe {
+        assert_eq!(IsWindow(fixture.hwnd), 0);
+        assert_eq!(IsMenu(menu), 0);
+    }
+    assert!(matches!(
+        fixture.events.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    Ok(())
+}
+
 struct CursorBitmaps(ICONINFO);
 impl Drop for CursorBitmaps {
     fn drop(&mut self) {

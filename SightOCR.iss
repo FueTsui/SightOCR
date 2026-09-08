@@ -1,6 +1,6 @@
 #define MyAppName "SightOCR"
 #ifndef MyAppVersion
-#define MyAppVersion "2.0.0"
+#define MyAppVersion "2.0.1"
 #endif
 #define MyAppPublisher "FueTsui"
 #define MyAppURL "https://github.com/FueTsui/SightOCR"
@@ -68,9 +68,12 @@ english.CloseRunningAppFailed=SightOCR could not exit within the allowed time. N
 chinesesimplified.CloseRunningAppFailed=SightOCR 未能在规定时间内退出，尚未替换任何文件。请通过托盘菜单退出 SightOCR 后重试。
 english.ProcessCheckFailed=Unable to check running processes. No files have been replaced. Please retry Setup.
 chinesesimplified.ProcessCheckFailed=无法检查正在运行的程序，尚未替换任何文件。请重新运行安装程序。
+english.CloseConsoleBeforeUpdate=SightOCR CLI or MCP is running in this installation. Stop it in your terminal or MCP client, then retry the update. No files have been replaced.
+chinesesimplified.CloseConsoleBeforeUpdate=此安装目录的 SightOCR CLI 或 MCP 正在运行。请在终端或 MCP 客户端停止服务后重试更新，尚未替换任何文件。
 
 [Files]
 Source: "{#PackageDir}\SightOCR.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\sightocr-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\docs\*.md"; DestDir: "{app}\docs"; Flags: ignoreversion
@@ -146,7 +149,22 @@ begin
   if not QueryFullProcessImageName(Process, 0, Name, Size) then
     Exit;
   SetLength(Name, Size);
-  Result := CompareText(Name, ExpandConstant('{app}\{#MyAppExeName}')) = 0;
+  Result := (CompareText(Name, ExpandConstant('{app}\{#MyAppExeName}')) = 0) or
+    (CompareText(Name, ExpandConstant('{app}\sightocr-cli.exe')) = 0);
+end;
+
+function IsConsoleProcess(Process: THandle): Boolean;
+var
+  Name: String;
+  Size: DWORD;
+begin
+  Size := 32768;
+  SetLength(Name, Size);
+  Result := False;
+  if not QueryFullProcessImageName(Process, 0, Name, Size) then
+    Exit;
+  SetLength(Name, Size);
+  Result := CompareText(Name, ExpandConstant('{app}\sightocr-cli.exe')) = 0;
 end;
 
 procedure RequestGracefulExit(ProcessId: DWORD);
@@ -187,6 +205,25 @@ begin
   end;
   if BytesReturned = 0 then
     Exit;
+  { Headless clients have no GUI exit-message handler. Check before closing
+    any GUI process, rather than waiting 120 seconds for a permanent MCP host. }
+  if IsUpdateMode then begin
+    for I := 0 to (BytesReturned div 4) - 1 do begin
+      Process := OpenProcess(ProcessQueryLimitedInformation or SynchronizeAccess,
+        False, ProcessIds[I]);
+      if Process <> 0 then begin
+        try
+          if IsConsoleProcess(Process) and
+             (WaitForSingleObject(Process, 0) <> WaitObject0) then begin
+            Result := CustomMessage('CloseConsoleBeforeUpdate');
+            Exit;
+          end;
+        finally
+          CloseHandle(Process);
+        end;
+      end;
+    end;
+  end;
   for I := 0 to (BytesReturned div 4) - 1 do begin
     Process := OpenProcess(ProcessQueryLimitedInformation or SynchronizeAccess,
       False, ProcessIds[I]);
