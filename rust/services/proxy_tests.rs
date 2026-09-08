@@ -208,7 +208,8 @@ fn switching_proxies_invalidates_sessions_but_invalid_manual_settings_do_not_com
         token: "synthetic-token".into(),
         ig: "synthetic".into(),
         iid: "synthetic".into(),
-        cookies: "synthetic-cookie".into(),
+        cookies: reqwest::cookie::Jar::default(),
+        page_url: reqwest::Url::parse(bing::TRANSLATOR_URL)?,
         expires: Instant::now() + Duration::from_secs(60),
         requests: 0,
     });

@@ -1,10 +1,40 @@
 # 验证记录
 
+## 2.0.1 发布与验证范围
+
+本节对应 2.0.1；下方 2.0.0 同版本重打包记录为历史证据。最终文件、SHA256 与本轮结果以 Release 附件 `VALIDATION.json` 为准。
+
+- 在主屏右下角的真实 Win32 菜单测量中，原菜单的末项「退出」与托盘点击区域发生重叠，可使连续点击误选退出。修复使用菜单排除区域避开图标，并阻止菜单重入和所有者关闭后的过期命令投递。菜单创建与关闭遵循 [Microsoft TrackPopupMenu 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-trackpopupmenu)与 [TrackPopupMenuEx 文档](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-trackpopupmenuex)。
+- 新增独立 App 的托盘生命周期验证入口：构建 debug `SightOCR` 后设置 `SIGHTOCR_SMOKE_UI_SCENARIO=tray`，运行 `SightOCR.exe --smoke-ui <输出目录>`。它向本测试进程拥有的真实窗口发送 Windows 消息，覆盖关闭到后台、左键、双击、连续点击及菜单取消；不向用户正在运行的实例发送操作。
+- 本次同时发布现有 CLI/MCP、正文编辑、中文拼音组合输入及 Bing 地区跳转修复。云端账号验证边界沿用各专项记录；本轮发布测试使用合成内容与本地 OCR。
+
+公开源码不包含 OneOCR DLL/模型、真实业务表格或派生 OCR 夹具；这些内容只留在本地验证工作区。公开仓库保留生产代码、合成基础夹具和本机资源提取脚本。下文的 `tests/样本`、`tests/fixtures/table-lines` 与 `target` 路径不表示文件随源码发布。
+
+公开 CI 使用标准 Windows Runner。两项补充字体覆盖测试与六项依赖完整字体栈/交互桌面的 RichEdit 测试保留已发布的显式忽略标记；默认测试串行运行。发布机通过 `cargo test --locked --bin SightOCR app::native_text::tests -- --include-ignored --test-threads=1` 另行检查全部原生编辑器测试。缺少补充字体的两项测试不能计作通过。
+
+## 2026-09-08 原文与译文拼音组合输入修复
+
+- 此轮针对“只能输入字母、输入法秒退”，补齐上一轮未覆盖的真实组合输入。旧同步逻辑会读取拼音临时字母并通过选区切换应用全文字体，打断尚未提交的组合。现代 RichEdit/TSF 还会通过父窗口 `EN_STARTCOMPOSITION` / `EN_ENDCOMPOSITION` 通知状态，不能只监听子窗口 `WM_IME_*`。现在同时接收两条路径；`ECN_NEWTEXT` 保持组合，只有实际结束才解除保护。依据 [Microsoft RichEdit 通知文档](https://learn.microsoft.com/en-us/windows/win32/controls/en-endcomposition)。
+- 组合期间暂停模型同步及改变选区的字体、主题、DPI 格式调整；结束后再同步最终文本。新 OCR/翻译结果仍能显式替换文档。原生编辑器获得焦点时保留已有输入上下文，仅在上下文被窗口框架断开时恢复；向 egui 发布原生光标位置，避免窗口框架把聚焦的原生编辑器当作无输入框而关闭输入法。
+- `target/ime-composition-20260908/live-confirmed/report.json`：独立生产 App 窗口通过真实 `SendInput` 键盘事件逐个输入 `N I H A O SPACE`，两栏均由已安装微软拼音提交 `你好`（U+4F60 U+597D）。每栏观察到一次组合开始、一次结束，组合期间格式化次数为 0，提交后为 1；窗口或编辑焦点不符即停止输入。测试完成后恢复线程输入法和上下文打开状态，不写入用户输入法配置、不访问剪贴板。
+- 初版仅保护 `WM_IME_*` 的实测仍得到 `n`，证据保留于 `live-after/report.json`；补齐 TSF 通知后最终实测通过。另有前台焦点变化导致的提前中止报告，这些运行未计作通过。
+- 原生编辑器 26 项串行回归通过，新增 4 项覆盖临时文本/选区/样式保护、取消与新结果、窗口框架断开后的上下文恢复，以及 TSF 新文本/最终结束通知和两栏隔离。既有 Unicode、撤销、只读恢复、菜单焦点、滚轮及稳定重绘测试继续保留。测试命令：`cargo test --locked --bin SightOCR app::native_text::tests -- --test-threads=1`。
+- 全局回归、正式包 CLI/MCP、安装/覆盖/卸载及最终 SHA256 记录见 `dist/installer/VALIDATION.json`，详细证据目录 `target/ime-composition-20260908/`。仍使用 2.0.0 版本号，需要运行本轮重新生成的安装包覆盖更新。
+- 实窗环境为 Windows 11 build 26200、微软拼音。Win10 实机及其他第三方输入法未覆盖，不能将本次实测视为全部系统与输入法组合已验收。沿用两项补充字体环境测试的显式排除，其原断言和默认构建门槛不变。
+
+## 2026-09-08 CLI/MCP、手动编辑与 Bing 授权地区跳转
+
+- 新增控制台 `sightocr-cli.exe`，保留桌面程序旧参数。CLI 提供图片/表格识别、文字/UTF-8 文件/stdin 翻译、JSON 输出、语言与服务临时覆盖；MCP 提供本地 OCR、翻译和语言列表，使用同一 Rust 服务与私有 Worker。头部参数错误返回 2，执行错误返回 1；stdout/stderr 分离，MCP stdout 仅含 JSON-RPC。
+- CLI/MCP 读取配置时不进行旧配置迁移、不创建缺失文件、不保存覆盖项；命令不启动 GUI、托盘、快捷键或剪贴板操作。新增 3 项 CLI 单测、4 项 MCP 单测及 5 项真实控制台进程集成测试通过。另用官方 MCP Python SDK 1.29.1 完成实际初始化、三个工具调用、输入/输出 schema 验证、工具失败后继续 ping、中文原始 UTF-8 输入和本地表格 OCR；测试没有在线翻译调用，配置散列保持不变。
+- 空白原文/译文占位区此前只记录下一帧聚焦意图，点击当帧没有原生编辑控件；空译文也缺少持久编辑模式。现点击当帧显示并聚焦 RichEdit，清空、失焦后保持编辑入口。原生正文现有非空输入在本机正常，不能将这一结果等同于复现所有旧安装构建的故障。
+- 默认 Bing 的授权 GET 原先使用禁止跳转的通用客户端，正常地区 HTTP 302 被当成失败；翻译 POST 和 Referer 也固定在 www。现在仅授权 GET 可在 HTTPS `www.bing.com`、`cn.bing.com` 间最多跳转 5 次，检查循环、非法地址及总超时，按 Cookie 域/路径/过期语义保存会话，并使用最终站点发起翻译。其他接口和翻译 POST 继续禁止自动重定向。
+- Bing 的 7 项本地 HTTP 回归通过，覆盖地区 302、相对 301、会话到译文、Cookie 范围、跳转限制及非法跳转。真实 Microsoft 往返使用合成 `Hello world`，系统代理和直连分别连续翻译两次成功，并验证会话复用；从未读取实际服务密钥或输出 Cookie/token。
+- 安装和便携包包含 CLI 与使用文档，校验和增加 CLI 程序；安装器覆盖同目录 GUI/CLI 进程检测。自动更新发现常驻 CLI/MCP 时立即提示先停止服务，避免无法收到 GUI 退出消息而等待 120 秒。安装回归包含真实 MCP 进程初始化、更新拒绝与文件保持检查。
+- 当前验证环境为 Windows 11 build 26200、Rust/Cargo 1.97.0、`stable-x86_64-pc-windows-gnu`。Win10 所报的地区 302 通过 HTTP 模拟覆盖，尚未在 Win10 实机复测。Bing 网页兼容接口仍可能随服务方变化。MCP 首版串行运行，不提供调用中的即时取消；具体限制见 [CLI/MCP](CLI_MCP.md)。
+- 本次全局检查、编辑专项、最终程序/安装包测试结果及 SHA256 以 `dist/installer/VALIDATION.json` 为准，详细日志保存在 `target/cli-mcp-edit-bing-20260908/`。沿用 2.0.0 版本号，请按 SHA256 区分历史构建。
+- 本机普通并行 `cargo test --locked` 有三项旧环境测试失败：两项缺少补充字体的广泛字形覆盖，以及一项原生字体选择断言。原生字体选择测试单独串行复跑通过，构建脚本因此串行测试；两项字形覆盖保留原断言，只有显式 `-SkipOptionalFontTests` 才排除。本次安装包采用该选项，不将这两项计作通过。全局严格 Clippy 通过；GNU 链接器报告既有 `.drectve` 诊断，该诊断不属于 Clippy 错误，保留在构建日志。
+
 环境：Windows x64，Rust / Cargo 1.98.1，MSVC Build Tools。记录更新日期：2026-09-06；9 月 5 日结果保留为历史记录。OCR 使用仓库测试图；原生截图测试验证取消与资源释放，不保存桌面图像。历史 Bing 在线验证仅发送合成文本 `Hello`，未使用用户云端密钥。
-
-公开源码发布说明：OneOCR DLL/模型、真实业务表格样本及其派生 OCR 夹具只保留在本地验证工作区，不进入公开 Git 历史；公开仓库保留合成基础夹具和生产源码。下文出现的 `tests/样本`、`tests/fixtures/table-lines` 与 `target` 路径属于本地验证证据位置，不表示这些材料随源码发布。
-
-公开 CI 使用标准 Windows Runner，未安装可选的印地语、孟加拉语语言字体，也不保证稳定的交互桌面帧；两项“已安装系统字体覆盖”测试、六项依赖完整字体栈或原生桌面渲染的 RichEdit 测试因此标记为显式环境测试并默认忽略。应在发布验证镜像上以 `cargo test --locked --bin SightOCR -- --ignored` 连同其他显式桌面测试串行运行。生产字体回退代码、纯逻辑字体测试及其他默认测试继续由 CI 执行。
 
 ## 2026-09-06 2.0.0 识别内容持续闪烁与滚轮滚动
 

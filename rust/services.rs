@@ -15,6 +15,7 @@ use std::io::Read;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod ai;
+mod bing;
 #[cfg(test)]
 mod proxy_tests;
 
@@ -71,7 +72,8 @@ struct BingSession {
     token: String,
     ig: String,
     iid: String,
-    cookies: String,
+    cookies: reqwest::cookie::Jar,
+    page_url: reqwest::Url,
     expires: Instant,
     requests: u32,
 }
@@ -473,30 +475,18 @@ impl Services {
     ) -> Result<String> {
         for attempt in 0..2 {
             anyhow::ensure!(!cancelled(), "任务已取消");
-            self.ensure_bing_session()?;
+            self.ensure_bing_session(cancelled)?;
             // Session initialization may block. Recheck before sending any text.
             anyhow::ensure!(!cancelled(), "任务已取消");
             let session = self.bing_session.as_mut().expect("session was initialized");
-            session.requests += 1;
-            let iid = format!("{}.{}", session.iid, session.requests);
-            let response = send(
-                self.client
-                    .post("https://www.bing.com/ttranslatev3")
-                    .query(&[
-                        ("isVertical", "1"),
-                        ("IG", session.ig.as_str()),
-                        ("IID", iid.as_str()),
-                    ])
-                    .header(reqwest::header::REFERER, "https://www.bing.com/translator")
-                    .header(reqwest::header::COOKIE, &session.cookies)
-                    .form(&[
-                        ("fromLang", source),
-                        ("to", target),
-                        ("text", text),
-                        ("token", session.token.as_str()),
-                        ("key", session.key.as_str()),
-                    ]),
-            )?;
+            let response = send(bing::translation_request(
+                &self.client,
+                session,
+                text,
+                source,
+                target,
+            )?)?;
+            bing::store_response_cookies(session, &response)?;
             if matches!(response.status().as_u16(), 401 | 403) {
                 self.bing_session = None;
                 if attempt == 0 {
@@ -516,7 +506,7 @@ impl Services {
         unreachable!("the second attempt always returns")
     }
 
-    fn ensure_bing_session(&mut self) -> Result<()> {
+    fn ensure_bing_session(&mut self, cancelled: &dyn Fn() -> bool) -> Result<()> {
         if self
             .bing_session
             .as_ref()
@@ -528,31 +518,10 @@ impl Services {
         // The old edge.microsoft.com/translate/auth endpoint currently returns
         // HTTP 404. Use the session published by Microsoft's own translator
         // page. This compatibility endpoint is not a guaranteed public API.
-        // All text stays with Microsoft; redirects remain disabled globally.
-        let response = send(
-            self.client
-                .get("https://www.bing.com/translator")
-                .header(reqwest::header::CACHE_CONTROL, "no-cache")
-                .timeout(Duration::from_secs(15)),
-        )?;
-        let mut cookies = Vec::new();
-        for value in response.headers().get_all(reqwest::header::SET_COOKIE) {
-            if let Ok(value) = value.to_str() {
-                if let Some(pair) = value.split(';').next().filter(|pair| pair.contains('=')) {
-                    cookies.push(pair.to_owned());
-                }
-            }
-        }
-        let cookies = cookies.join("; ");
-        if cookies.len() > 16_384 {
-            return Err(ServiceError::InvalidResponse("翻译会话 Cookie 过长").into());
-        }
-        let bytes = read_response(response, "默认翻译授权", 2 * 1024 * 1024)?;
-        let html = std::str::from_utf8(&bytes)
-            .map_err(|_| ServiceError::InvalidResponse("翻译页面不是 UTF-8"))?;
-        let mut session = parse_bing_session(html)?;
-        session.cookies = cookies;
-        self.bing_session = Some(session);
+        // Region redirects are followed only for this credential-free page GET,
+        // with a Bing host allowlist and origin-scoped cookies. Every other
+        // request, including translation POSTs, retains redirect::Policy::none.
+        self.bing_session = Some(bing::authorize(&self.client, cancelled)?);
         Ok(())
     }
 }
@@ -627,7 +596,9 @@ fn parse_bing_session(html: &str) -> Result<BingSession> {
         token,
         ig,
         iid,
-        cookies: String::new(),
+        cookies: reqwest::cookie::Jar::default(),
+        page_url: reqwest::Url::parse(bing::TRANSLATOR_URL)
+            .expect("the built-in translator URL is valid"),
         expires: Instant::now() + Duration::from_millis(lifetime),
         requests: 0,
     })

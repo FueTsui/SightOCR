@@ -214,6 +214,22 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Headless commands read current settings without migrating or writing files.
+    pub fn load_read_only() -> Result<Self> {
+        let path = match std::env::var_os("SIGHTOCR_CONFIG") {
+            Some(path) => {
+                anyhow::ensure!(!path.is_empty(), "SIGHTOCR_CONFIG 不能为空");
+                PathBuf::from(path)
+            }
+            None => default_path()?,
+        };
+        if path.try_exists().context("无法检查配置文件")? {
+            Self::read(&path)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
     pub fn load() -> Result<(Self, PathBuf)> {
         if let Some(override_path) = std::env::var_os("SIGHTOCR_CONFIG") {
             if override_path.is_empty() {

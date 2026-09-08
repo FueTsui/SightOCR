@@ -1,4 +1,4 @@
-param([switch]$Installer, [string]$IsccPath = $env:SIGHTOCR_ISCC)
+param([switch]$Installer, [string]$IsccPath = $env:SIGHTOCR_ISCC, [switch]$SkipOptionalFontTests)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
@@ -11,13 +11,24 @@ function Invoke-Cargo([string[]]$CargoArguments) {
 }
 Invoke-Cargo -CargoArguments @('fmt', '--all', '--', '--check')
 Invoke-Cargo -CargoArguments @('clippy', '--all-targets', '--locked', '--', '-D', 'warnings')
-Invoke-Cargo -CargoArguments @('test', '--locked')
-Invoke-Cargo -CargoArguments @('build', '--release', '--locked', '--bin', 'SightOCR')
+# Native font/focus fixtures share Windows desktop state; run them serially.
+$testArguments = @('test', '--locked', '--', '--test-threads=1')
+if ($SkipOptionalFontTests) {
+    # Keep the full default gate. This opt-in excludes only the two tests
+    # requiring supplemental Windows Indic font coverage, never input tests.
+    Write-Warning 'Skipping two supplemental-font environment tests; record this limit in validation evidence.'
+    $testArguments += @(
+        '--skip', 'app::fonts::tests::installed_windows_fonts_cover_additional_international_scripts',
+        '--skip', 'app::fonts::tests::installed_windows_fonts_cover_every_configured_language')
+}
+Invoke-Cargo -CargoArguments $testArguments
+Invoke-Cargo -CargoArguments @('build', '--release', '--locked', '--bins')
 $packageRoot = Join-Path $projectRoot 'dist/SightOCR'
 $stagingRoot = Join-Path $projectRoot ('target/package-' + [guid]::NewGuid().ToString('N'))
 $modelRoot = Join-Path $stagingRoot 'resources/oneocr'
 New-Item -ItemType Directory -Path $modelRoot -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/SightOCR.exe') -Destination $stagingRoot
+Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/sightocr-cli.exe') -Destination $stagingRoot
 foreach ($name in @('oneocr.dll', 'onnxruntime.dll', 'oneocr.onemodel')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "resources/oneocr/$name") -Destination $modelRoot -Force
 }
@@ -25,7 +36,7 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $stagin
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $stagingRoot
 $stagingDocs = Join-Path $stagingRoot 'docs'
 New-Item -ItemType Directory -Path $stagingDocs -Force | Out-Null
-foreach ($name in @('RUST_REFACTOR.md', 'VALIDATION.md', 'UI_DESIGN.md', 'INSTALLATION.md')) {
+foreach ($name in @('RUST_REFACTOR.md', 'VALIDATION.md', 'UI_DESIGN.md', 'INSTALLATION.md', 'CLI_MCP.md')) {
     $sourceDocument = Join-Path $projectRoot "docs/$name"
     if (Test-Path -LiteralPath $sourceDocument) { Copy-Item -LiteralPath $sourceDocument -Destination $stagingDocs }
 }
@@ -76,10 +87,12 @@ if ($Installer) {
     if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) { throw 'Installer output is missing.' }
     $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash
     $programHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'SightOCR.exe') -Algorithm SHA256).Hash
+    $cliHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'sightocr-cli.exe') -Algorithm SHA256).Hash
     # Publish alongside the setup asset for clients whose GitHub digest is absent.
-    $checksumText = "$installerHash  $([IO.Path]::GetFileName($installerPath))`n$programHash  ../SightOCR/SightOCR.exe`n"
+    $checksumText = "$installerHash  $([IO.Path]::GetFileName($installerPath))`n$programHash  ../SightOCR/SightOCR.exe`n$cliHash  ../SightOCR/sightocr-cli.exe`n"
     [IO.File]::WriteAllText((Join-Path $projectRoot 'dist/installer/SHA256SUMS.txt'), $checksumText, [Text.UTF8Encoding]::new($false))
     Write-Host "Installer: $installerPath"
     Write-Host "Installer SHA256: $installerHash"
 }
 Write-Host "Built: $packageRoot/SightOCR.exe"
+Write-Host "CLI / MCP: $packageRoot/sightocr-cli.exe"

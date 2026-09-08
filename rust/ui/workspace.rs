@@ -353,6 +353,10 @@ impl App {
                         && !self.native_editors.is_focused(0)
                     {
                         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                        #[cfg(debug_assertions)]
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(egui::Id::new("smoke_source_body_rect"), rect)
+                        });
                         empty_state(
                             ui,
                             rect,
@@ -363,7 +367,9 @@ impl App {
                         );
                         if enabled && response.clicked() {
                             self.editing_text = true;
-                            self.focus_source = true;
+                            self.native_editors
+                                .show_at(0, ui, &self.source, rect, true, true);
+                            self.focus_source = false;
                         }
                     } else {
                         let response = self.native_editors.show(
@@ -492,21 +498,28 @@ impl App {
                     }
                     let size = egui::vec2(ui.available_width(), body_height);
                     if self.translation.is_empty()
+                        && !self.editing_text
                         && !self.focus_translation
                         && !self.native_editors.is_focused(1)
                     {
                         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+                        #[cfg(debug_assertions)]
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(egui::Id::new("smoke_translation_body_rect"), rect)
+                        });
                         empty_state(
                             ui,
                             rect,
                             Icon::Translate,
                             "译文将显示在这里",
-                            "选择目标语言，点击「翻译原文」",
+                            "点击这里输入文字，或点击「翻译原文」",
                             &p,
                         );
                         if !self.busy && response.clicked() {
                             self.editing_text = true;
-                            self.focus_translation = true;
+                            self.native_editors
+                                .show_at(1, ui, &self.translation, rect, true, true);
+                            self.focus_translation = false;
                         }
                     } else {
                         let response = self.native_editors.show(
