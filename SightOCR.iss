@@ -322,6 +322,7 @@ begin
   Result := True;
   if CurPageID <> wpReady then
     Exit;
+  ApplyLegacyUpdateDestination;
   Error := FindPreviousVersions;
   if Error = '' then Error := CloseRunningApp;
   Result := Error = '';
@@ -342,6 +343,7 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   { Also catches silent installs and an app started after the Ready page. }
+  ApplyLegacyUpdateDestination;
   Result := FindPreviousVersions;
   if Result = '' then Result := CloseRunningApp;
   if Result = '' then Result := RemovePreviousVersions;

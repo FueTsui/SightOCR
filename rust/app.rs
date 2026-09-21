@@ -115,6 +115,7 @@ pub fn run(silent: bool) -> Result<()> {
     let _legacy_cleanup = crate::legacy_cache::Cleanup::start()?;
     let (mut config, path) = Config::load()?;
     config.autostart = platform::is_autostart_enabled()?;
+    config.run_as_admin = crate::elevation::is_enabled()?;
     let icon = image::load_from_memory(include_bytes!("../assets/icon.png"))?.into_rgba8();
     let options = eframe::NativeOptions {
         viewport: main_viewport()
@@ -702,7 +703,8 @@ impl App {
         )?;
         let result = (|| {
             platform::set_autostart(self.draft.autostart)?;
-            self.draft.save(&self.path)
+            self.draft.save(&self.path)?;
+            crate::elevation::set_enabled(self.draft.run_as_admin)
         })();
         if let Err(error) = result {
             let rollback = platform.update(
@@ -712,12 +714,18 @@ impl App {
                 previous.hide_tray_icon,
             );
             let startup_rollback = startup_snapshot.restore();
+            let config_rollback = previous.save(&self.path);
             rollback.context("保存失败，且热键回滚失败")?;
             startup_rollback.context("保存失败，且开机启动回滚失败")?;
+            config_rollback.context("保存失败，且配置文件回滚失败")?;
             return Err(error);
         }
         self.config = self.draft.clone();
-        self.status = "设置已保存".into();
+        self.status = if previous.run_as_admin != self.config.run_as_admin {
+            "设置已保存，管理员运行选项将在下次启动时生效".into()
+        } else {
+            "设置已保存".into()
+        };
         Ok(())
     }
 
