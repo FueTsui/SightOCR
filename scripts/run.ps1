@@ -1,11 +1,6 @@
-param([switch]$Legacy)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
-if ($Legacy) {
-    & python (Join-Path $projectRoot 'SightOCR.py')
-    exit $LASTEXITCODE
-}
 foreach ($relative in @('dist/SightOCR/SightOCR.exe', 'target/release/SightOCR.exe')) {
     $application = Join-Path $projectRoot $relative
     if (Test-Path -LiteralPath $application) {

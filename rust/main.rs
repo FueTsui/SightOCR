@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod elevation;
+mod legacy_cache;
 
 use sightocr::worker;
 use std::path::PathBuf;
@@ -32,23 +34,19 @@ fn main() {
         }
         return;
     }
-    let gui = args.is_empty() || args == ["--silent"];
-    let result = if gui {
-        app::run(args == ["--silent"])
-    } else {
-        // SAFETY: Attaches only to an existing parent console, creates no window.
-        unsafe {
-            windows_sys::Win32::System::Console::AttachConsole(
-                windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
-            );
+    if !args.is_empty() && args != ["--silent"] {
+        std::process::exit(2);
+    }
+    match elevation::relaunch_if_requested(args == ["--silent"]) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            show_error(&format!("无法以管理员身份启动：{error:#}"));
+            std::process::exit(1);
         }
-        std::process::exit(sightocr::cli::run(args))
-    };
-    if let Err(error) = result {
-        eprintln!("SightOCR: {error:#}");
-        if gui {
-            show_error(&format!("{error:#}"));
-        }
+    }
+    if let Err(error) = app::run(args == ["--silent"]) {
+        show_error(&format!("{error:#}"));
         std::process::exit(1);
     }
 }

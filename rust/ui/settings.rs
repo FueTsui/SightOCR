@@ -282,11 +282,11 @@ impl App {
             let label_width = ui.available_width() - control_width - ui.spacing().item_spacing.x;
             ui.horizontal(|ui| {
                 ui.allocate_ui_with_layout(
-                    egui::vec2(label_width, 0.0),
-                    Layout::top_down(Align::Min),
+                    egui::vec2(label_width, ui.spacing().interact_size.y),
+                    Layout::left_to_right(Align::Center),
                     |ui| {
                         ui.set_width(label_width);
-                        setting_description(ui, p, "代理模式", "");
+                        ui.label(RichText::new("代理模式").size(14.0).color(p.text));
                     },
                 );
                 let selected = match self.draft.proxy.mode {
@@ -403,14 +403,6 @@ impl App {
         ui.add_space(4.0);
         card(ui, p, |ui| {
             card_title(ui, p, "本机信息", "");
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("运行版本").size(13.0).color(p.muted));
-                ui.label(
-                    RichText::new(format!("{} · Rust", env!("CARGO_PKG_VERSION")))
-                        .size(13.0)
-                        .color(p.text),
-                );
-            });
             egui::CollapsingHeader::new(RichText::new("配置文件位置").size(13.0).color(p.muted))
                 .id_salt("configuration_path")
                 .show(ui, |ui| {
@@ -522,11 +514,11 @@ fn appearance_card(ui: &mut egui::Ui, p: &Palette, config: &mut Config) {
         let label_width = ui.available_width() - control_width - ui.spacing().item_spacing.x;
         ui.horizontal(|ui| {
             ui.allocate_ui_with_layout(
-                egui::vec2(label_width, 0.0),
-                Layout::top_down(Align::Min),
+                egui::vec2(label_width, ui.spacing().interact_size.y),
+                Layout::left_to_right(Align::Center),
                 |ui| {
                     ui.set_width(label_width);
-                    setting_description(ui, p, "应用主题", "");
+                    ui.label(RichText::new("应用主题").size(14.0).color(p.text));
                 },
             );
             select_choice(
@@ -655,14 +647,25 @@ fn startup_card(ui: &mut egui::Ui, p: &Palette, autostart: &mut bool, hide_tray:
 fn toggle_row(ui: &mut egui::Ui, p: &Palette, value: &mut bool, label: &str, help: &str) {
     ui.horizontal(|ui| {
         let text_width = (ui.available_width() - 40.0 - ui.spacing().item_spacing.x).max(100.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(text_width, 0.0),
-            Layout::top_down(Align::Min),
-            |ui| {
-                ui.set_width(text_width);
-                setting_description(ui, p, label, help);
-            },
-        );
+        if help.is_empty() {
+            ui.allocate_ui_with_layout(
+                egui::vec2(text_width, ui.spacing().interact_size.y),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.set_width(text_width);
+                    ui.label(RichText::new(label).size(14.0).color(p.text));
+                },
+            );
+        } else {
+            ui.allocate_ui_with_layout(
+                egui::vec2(text_width, 0.0),
+                Layout::top_down(Align::Min),
+                |ui| {
+                    ui.set_width(text_width);
+                    setting_description(ui, p, label, help);
+                },
+            );
+        }
         let (rect, mut response) = ui.allocate_exact_size(egui::vec2(40.0, 20.0), Sense::click());
         if response.clicked() {
             *value = !*value;

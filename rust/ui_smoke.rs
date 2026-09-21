@@ -222,6 +222,10 @@ pub(super) struct State {
     shutdown_evaluated: bool,
 }
 
+fn settings_only() -> bool {
+    std::env::var("SIGHTOCR_SMOKE_UI_SCENARIO").as_deref() == Ok("settings")
+}
+
 pub fn run(directory: PathBuf) -> Result<()> {
     if std::env::var("SIGHTOCR_SMOKE_UI_SCENARIO").as_deref() == Ok("tray") {
         return tray_lifecycle_smoke::run(directory);
@@ -290,7 +294,11 @@ pub fn run(directory: PathBuf) -> Result<()> {
             *shutdown_sender.lock().unwrap() = Some(app.sender.clone());
             app.smoke_copies = Some(std::cell::RefCell::new(Vec::new()));
             // Exercise the --silent frame ordering without changing real tray/startup settings.
-            app.startup_hide_after_frames = 2;
+            app.startup_hide_after_frames = if settings_only() { 0 } else { 2 };
+            if settings_only() {
+                app.settings_open = true;
+                app.draft = app.config.clone();
+            }
             cc.egui_ctx.set_theme(egui::ThemePreference::Light);
             app.source = SAMPLE_SOURCE.into();
             app.translation = SAMPLE_TRANSLATION.into();
@@ -299,7 +307,11 @@ pub fn run(directory: PathBuf) -> Result<()> {
             app.status = "识别完成 · 已生成示例译文".into();
             app.smoke = Some(State {
                 directory: app_directory,
-                stage: Stage::Startup,
+                stage: if settings_only() {
+                    Stage::Settings
+                } else {
+                    Stage::Startup
+                },
                 since: Instant::now(),
                 started: Instant::now(),
                 stage_frames: 0,
@@ -594,6 +606,11 @@ impl State {
                     }
                     Stage::Settings => {
                         self.report.lock().unwrap().settings_screenshot = true;
+                        if settings_only() {
+                            app.settings_tab = 1;
+                            self.advance(Stage::Services);
+                            return;
+                        }
                         app.settings_tab = super::settings_ui::HOTKEYS_TAB;
                         self.advance(Stage::Hotkeys);
                     }
@@ -623,6 +640,14 @@ impl State {
                     }
                     Stage::Services => {
                         self.report.lock().unwrap().services_screenshot = true;
+                        if settings_only() {
+                            app.settings_tab = 3;
+                            ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(
+                                1060.0, 680.0,
+                            )));
+                            self.advance(Stage::Proxy);
+                            return;
+                        }
                         ctx.data_mut(|data| {
                             data.insert_temp(egui::Id::new("settings_service_provider"), 4_usize)
                         });
@@ -660,6 +685,11 @@ impl State {
                     }
                     Stage::Proxy => {
                         self.report.lock().unwrap().proxy_screenshot = true;
+                        if settings_only() {
+                            app.settings_tab = 2;
+                            self.advance(Stage::About);
+                            return;
+                        }
                         ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(740.0, 580.0)));
                         self.advance(Stage::ProxyCompact);
                     }
@@ -673,6 +703,12 @@ impl State {
                     }
                     Stage::About => {
                         self.report.lock().unwrap().about_screenshot = true;
+                        if settings_only() {
+                            self.report.lock().unwrap().complete = true;
+                            app.exiting = true;
+                            ctx.send_viewport_cmd(ViewportCommand::Close);
+                            return;
+                        }
                         app.update.busy = true;
                         let _ = app.sender.send(Event::UpdateProgress(
                             sightocr::updater::UpdateProgress::Downloading {

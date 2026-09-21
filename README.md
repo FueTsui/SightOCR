@@ -1,14 +1,16 @@
 # SightOCR
 
+2.0.2：安装前识别并卸载用户目录及系统目录中的旧版，兼容历史卸载登记键名；默认安装到 Program Files，可勾选始终以管理员身份运行。界面统一显示“本地 OCR”，移除重复运行版本信息。旧截图残留按 72 小时保留、每 24 小时清理；源码与开发流程已移除 Python。
+
 Windows 截图识别与翻译工具，现采用 **Rust + egui + Win32** 重写，运行时不需要 Python、Qt、NumPy 或 OpenCV。
 
-CLI 与本地 stdio MCP 使用 `sightocr-cli.exe`，随安装包和便携目录一起提供。支持本地图片/表格识别、文字/文件/标准输入翻译和 JSON 输出，参见 [CLI 与 MCP 使用说明](docs/CLI_MCP.md)。
+本地 stdio MCP 使用 `sightocr-mcp.exe`，配套通用 Skill 随安装包提供。参见 [MCP 与 Skill 使用说明](docs/MCP.md)。
 
 原文和译文均可手动编辑：空白区点击后立即进入输入状态，清空文本后仍可继续输入。已修复拼音首字母输入后候选窗口立即关闭的问题；输入法组合期间保留临时文本和选区，选词提交后再更新正文格式。默认 Bing 翻译已支持授权页在可信 Bing HTTPS 站点间的地区跳转，并保持对应站点的会话。
 
 ## 运行
 
-运行 `dist\installer\SightOCR-Setup-2.0.1.exe` 安装；也可双击 `启动.bat`，或运行便携目录中的 `dist\SightOCR\SightOCR.exe`。2.0.1 加固系统托盘生命周期，并包含 CLI/MCP、正文编辑、中文拼音组合输入与 Bing 地区跳转修复。从源码启动且尚未构建时，脚本会调用 Cargo 构建 Release。要求 Windows 10/11 x64。安装、升级和卸载说明见 [Windows 安装包](docs/INSTALLATION.md)。
+运行 `dist\installer\SightOCR-Setup-2.0.2.exe` 安装；也可双击 `启动.bat`，或运行便携目录中的 `dist\SightOCR\SightOCR.exe`。2.0.1 加固系统托盘生命周期，并包含 MCP、正文编辑、中文拼音组合输入与 Bing 地区跳转修复。从源码启动且尚未构建时，脚本会调用 Cargo 构建 Release。要求 Windows 10/11 x64。安装、升级和卸载说明见 [Windows 安装包](docs/INSTALLATION.md)。
 
 | 操作 | 功能 |
 | --- | --- |
@@ -34,7 +36,7 @@ CLI 与本地 stdio MCP 使用 `sightocr-cli.exe`，随安装包和便携目录�
 - **设置**：按顺序包含常规、接口、快捷键、代理、关于五页，「返回」与导航位于同一行。常规直接展示应用主题、合并文本换行、开机自动启动和隐藏托盘图标，移除分组标题；接口通过七项服务选择器切换凭据与模型表单；快捷键独立成页，直接展示三项录入控件，位于接口与代理之间；关于页提供版本和配置位置，移除产品简介与自动更新流程说明，退出操作位于托盘菜单。语言与翻译服务在工作台选择。底部固定「保存」与「取消」按钮，外观与快捷键在保存成功后生效。
 - **任务反馈**：普通识别与翻译的等待页显示当前阶段、提交任务时选定的服务与目标语言、已用时间和取消入口。截图并翻译会先展示识别原文，再等待译文。取消后忽略迟到的进度与完成事件；处理期间锁定输入，避免结果覆盖正在编辑的文字。
 
-桌面界面专注截图与文字输入，已移除图片导入和拖放识别。文件识别仍可使用命令行 `--ocr`，支持 PNG、JPEG、BMP、WebP。
+桌面界面专注截图与文字输入，已移除图片导入和拖放识别。文件识别可通过 MCP 的 `sightocr_ocr` 工具调用，支持 PNG、JPEG、BMP、WebP。
 
 托盘悬停提示仅显示「SightOCR」。托盘菜单按顺序包含「主界面、静默识别、截图识别、截图翻译、设置、重启、退出」七项。三项截图操作旁显示当前生效的快捷键；设置保存成功后同步更新，保存失败时保留原快捷键。重启会先释放窗口、任务与热键，再启动新进程。
 
@@ -121,32 +123,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Installer
 
 公开源码不包含 OneOCR DLL/模型或真实业务表格及派生夹具。可使用 `tests/ExtractOCR.bat` 从本机截图工具提取所需资源。公开 CI 运行默认测试；依赖补充字体和交互桌面的测试保持显式忽略，应在配置完整的 Windows 验证机上串行执行。
 
-## 命令行
+## MCP 与 Skill
 
-```powershell
-# 本地识别，不上传图片
-& .\target\release\SightOCR.exe --ocr .\tests\fixtures\basic.png --output .\result.txt
-# 本地表格
-& .\target\release\SightOCR.exe --ocr .\table.png --table --output .\table.tsv
-# 按配置的服务翻译，会发送指定文本
-& .\target\release\SightOCR.exe --translate 'Hello world' --from en --to zh-Hans --output .\translation.txt
-```
-
-以上旧参数继续兼容。自动化推荐使用控制台程序：
-
-```powershell
-& .\dist\SightOCR\sightocr-cli.exe ocr .\tests\fixtures\basic.png --format json
-& .\dist\SightOCR\sightocr-cli.exe translate --input .\source.txt --to en --provider bing
-& .\dist\SightOCR\sightocr-cli.exe mcp
-```
-
-`sightocr-cli.exe` 支持标准输入输出及可靠的进程等待，返回码 0 为成功，非 0 为失败。`SightOCR.exe` Release 仍为 GUI 子系统，旧批处理建议使用 `--output` 并等待进程结束。MCP 客户端配置及完整参数见 [CLI 与 MCP](docs/CLI_MCP.md)。
+通过 `sightocr-mcp.exe` 连接 stdio MCP，启动参数为空。配套 `skills/sightocr/SKILL.md` 引导 AI 客户端调用 OCR、翻译和语言查询工具。详见 [MCP 与 Skill](docs/MCP.md)。
 
 ## 结构
 
 ```text
-rust/main.rs       GUI / CLI 入口
-rust/cli.rs        共享命令行与无界面任务入口
+rust/main.rs       GUI 入口
+rust/headless.rs   MCP 无界面识别与翻译任务
 rust/mcp.rs        本地 stdio MCP 协议与工具
 rust/app.rs        应用状态、任务与系统事件
 rust/ui/           工作台、设置、主题与原生窗口样式
@@ -162,7 +147,9 @@ scripts/           启动与构建
 resources/oneocr/  原有 DLL 与模型
 ```
 
-`SightOCR.py`、`src/*.py`、`requirements.txt` 和旧打包说明保留作迁移参考，不参与 Rust 运行。`scripts/run.ps1 -Legacy` 可运行旧版，需另装旧 Python 依赖。
+项目已移除旧 Python 源码、字节码、依赖清单与启动入口，开发和构建使用 Rust 与 PowerShell。MCP 进程回归可执行 `scripts/test-mcp.ps1`。
+
+当前截图仅在内存和匿名管道中传递，识别后不会留下临时截图文件。程序启动时及每 24 小时检查旧版缓存：仅删除 `%TEMP%\SightOCR\screenshots` 和 `%TEMP%` 中命名为 `sight_YYYYMMDD_HHMMSS.png`、超过 72 小时的文件，不递归删除目录，不删除用户导入或保存的图片。
 
 重构问题清单和人工回归项目见 [重构记录](docs/RUST_REFACTOR.md)，实测结果见 [验证记录](docs/VALIDATION.md)。本地复杂合并/倾斜表格仍属于启发式恢复；多屏混合 DPI、远程桌面和云端账号权限需在目标环境验证。
 

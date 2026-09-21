@@ -254,7 +254,10 @@ impl Config {
         .into_iter()
         .flatten()
         {
-            if root.join("SightOCR.py").is_file() && !roots.contains(&root) {
+            if root.join("Cargo.toml").is_file()
+                && root.join("rust/main.rs").is_file()
+                && !roots.contains(&root)
+            {
                 roots.push(root);
             }
         }

@@ -1,7 +1,7 @@
 //! A bounded MCP stdio server for SightOCR's three synchronous tools.
 //! Implements the 2025-11-25 / 2025-06-18 lifecycle and tools subset. No HTTP,
 //! resources, prompts, sampling, tasks, or configuration mutation are advertised.
-use crate::cli::{self, Headless, MAX_TEXT_BYTES, PROVIDERS};
+use crate::headless::{self, Headless, MAX_TEXT_BYTES, PROVIDERS};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -253,7 +253,7 @@ impl Server {
                 .map_err(|_| anyhow::anyhow!("Expected text and optional source_lang, target_lang, provider strings; no extra fields"))
                 .and_then(|args| self.headless.translate(&args.text, args.source_lang.as_deref(), args.target_lang.as_deref(), args.provider.as_deref())),
             "sightocr_languages" => {
-                if arguments.as_object().is_some_and(Map::is_empty) { Ok(cli::languages()) }
+                if arguments.as_object().is_some_and(Map::is_empty) { Ok(headless::languages()) }
                 else { Err(anyhow::anyhow!("sightocr_languages accepts no arguments")) }
             }
             _ => return error(id, -32602, "Unknown tool name"),

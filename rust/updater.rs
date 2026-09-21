@@ -223,15 +223,20 @@ pub fn apply_update(manifest_path: &Path) -> Result<()> {
                 log_arg.push(&log_path);
                 let status = Command::new(installer)
                     .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE"])
-                    .arg(directory_arg)
-                    .arg(log_arg)
+                    .arg(&directory_arg)
+                    .arg(&log_arg)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .creation_flags(0x0800_0000)
-                    .status()
-                    .map_err(|_| anyhow!("无法运行更新安装程序"))?;
-                let code = status.code().unwrap_or(-1);
+                    .status();
+                let code = match status {
+                    Ok(status) => status.code().unwrap_or(-1),
+                    Err(error) if error.raw_os_error() == Some(740) => {
+                        run_elevated_installer(installer, directory_arg, log_arg)?
+                    }
+                    Err(error) => return Err(anyhow!("无法运行更新安装程序：{error}")),
+                };
                 ensure!(
                     code == 0,
                     "安装程序未能完成更新（退出码 {code}）。日志：{}",
@@ -253,6 +258,64 @@ pub fn apply_update(manifest_path: &Path) -> Result<()> {
     }
     #[cfg(not(windows))]
     anyhow::bail!("自动安装更新仅支持 Windows")
+}
+
+#[cfg(windows)]
+fn run_elevated_installer(
+    installer: &Path,
+    directory_arg: std::ffi::OsString,
+    log_arg: std::ffi::OsString,
+) -> Result<i32> {
+    use std::{mem::size_of, os::windows::ffi::OsStrExt};
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_OBJECT_0},
+        System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE},
+        UI::{
+            Shell::{
+                ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+            },
+            WindowsAndMessaging::SW_HIDE,
+        },
+    };
+    let path: Vec<u16> = installer.as_os_str().encode_wide().chain(Some(0)).collect();
+    // Windows paths cannot contain quotes. Quote each whole argument, including
+    // the /DIR= and /LOG= prefixes, to preserve spaces and non-ASCII characters.
+    let mut parameters =
+        std::ffi::OsString::from("/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /UPDATE \"");
+    parameters.push(directory_arg);
+    parameters.push("\" \"");
+    parameters.push(log_arg);
+    parameters.push("\"");
+    let parameters: Vec<u16> = parameters.encode_wide().chain(Some(0)).collect();
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+        lpVerb: verb.as_ptr(),
+        lpFile: path.as_ptr(),
+        lpParameters: parameters.as_ptr(),
+        nShow: SW_HIDE,
+        // SAFETY: Omitted optional fields accept null/zero defaults.
+        ..unsafe { std::mem::zeroed() }
+    };
+    // SAFETY: All strings and the structure remain valid during the call.
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        return Err(anyhow!(
+            "更新安装程序未获得管理员权限：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    ensure!(!info.hProcess.is_null(), "无法等待管理员安装程序");
+    let mut code = 0;
+    // SAFETY: ShellExecuteEx returned an owned process handle. Wait and read its exit code.
+    let ok = unsafe {
+        WaitForSingleObject(info.hProcess, INFINITE) == WAIT_OBJECT_0
+            && GetExitCodeProcess(info.hProcess, &mut code) != 0
+    };
+    // SAFETY: Close the owned process handle exactly once.
+    unsafe { CloseHandle(info.hProcess) };
+    ensure!(ok, "无法读取管理员安装程序的完成状态");
+    Ok(code as i32)
 }
 
 #[cfg(windows)]

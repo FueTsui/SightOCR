@@ -79,7 +79,7 @@ impl App {
                 if translating {
                     format!("{} · 翻译为{}", job.translator, job.target)
                 } else if job.stage == ProgressStage::LocalFallback {
-                    "本地 OneOCR · 继续识别".into()
+                    "本地 OCR · 继续识别".into()
                 } else {
                     job.ocr_provider.clone()
                 }
