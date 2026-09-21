@@ -112,6 +112,7 @@ pub fn run(silent: bool) -> Result<()> {
     let Some(instance) = SingleInstance::acquire()? else {
         return Ok(());
     };
+    let _legacy_cleanup = crate::legacy_cache::Cleanup::start()?;
     let (mut config, path) = Config::load()?;
     config.autostart = platform::is_autostart_enabled()?;
     let icon = image::load_from_memory(include_bytes!("../assets/icon.png"))?.into_rgba8();

@@ -7,5 +7,12 @@ fn main() {
         }
         return;
     }
-    std::process::exit(sightocr::cli::run(args));
+    if !args.is_empty() {
+        eprintln!("SightOCR MCP accepts no command arguments; connect using stdio.");
+        std::process::exit(2);
+    }
+    if let Err(error) = sightocr::mcp::run_stdio() {
+        eprintln!("SightOCR MCP: {error:#}");
+        std::process::exit(1);
+    }
 }

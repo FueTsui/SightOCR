@@ -28,15 +28,16 @@ $stagingRoot = Join-Path $projectRoot ('target/package-' + [guid]::NewGuid().ToS
 $modelRoot = Join-Path $stagingRoot 'resources/oneocr'
 New-Item -ItemType Directory -Path $modelRoot -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/SightOCR.exe') -Destination $stagingRoot
-Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/sightocr-cli.exe') -Destination $stagingRoot
+Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/sightocr-mcp.exe') -Destination $stagingRoot
 foreach ($name in @('oneocr.dll', 'onnxruntime.dll', 'oneocr.onemodel')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "resources/oneocr/$name") -Destination $modelRoot -Force
 }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $stagingRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $stagingRoot
+Copy-Item -LiteralPath (Join-Path $projectRoot 'skills') -Destination $stagingRoot -Recurse
 $stagingDocs = Join-Path $stagingRoot 'docs'
 New-Item -ItemType Directory -Path $stagingDocs -Force | Out-Null
-foreach ($name in @('RUST_REFACTOR.md', 'VALIDATION.md', 'UI_DESIGN.md', 'INSTALLATION.md', 'CLI_MCP.md')) {
+foreach ($name in @('RUST_REFACTOR.md', 'VALIDATION.md', 'UI_DESIGN.md', 'INSTALLATION.md', 'MCP.md')) {
     $sourceDocument = Join-Path $projectRoot "docs/$name"
     if (Test-Path -LiteralPath $sourceDocument) { Copy-Item -LiteralPath $sourceDocument -Destination $stagingDocs }
 }
@@ -87,12 +88,12 @@ if ($Installer) {
     if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) { throw 'Installer output is missing.' }
     $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash
     $programHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'SightOCR.exe') -Algorithm SHA256).Hash
-    $cliHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'sightocr-cli.exe') -Algorithm SHA256).Hash
+    $mcpHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'sightocr-mcp.exe') -Algorithm SHA256).Hash
     # Publish alongside the setup asset for clients whose GitHub digest is absent.
-    $checksumText = "$installerHash  $([IO.Path]::GetFileName($installerPath))`n$programHash  ../SightOCR/SightOCR.exe`n$cliHash  ../SightOCR/sightocr-cli.exe`n"
+    $checksumText = "$installerHash  $([IO.Path]::GetFileName($installerPath))`n$programHash  ../SightOCR/SightOCR.exe`n$mcpHash  ../SightOCR/sightocr-mcp.exe`n"
     [IO.File]::WriteAllText((Join-Path $projectRoot 'dist/installer/SHA256SUMS.txt'), $checksumText, [Text.UTF8Encoding]::new($false))
     Write-Host "Installer: $installerPath"
     Write-Host "Installer SHA256: $installerHash"
 }
 Write-Host "Built: $packageRoot/SightOCR.exe"
-Write-Host "CLI / MCP: $packageRoot/sightocr-cli.exe"
+Write-Host "MCP: $packageRoot/sightocr-mcp.exe"

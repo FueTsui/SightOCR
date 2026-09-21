@@ -1,6 +1,6 @@
 #define MyAppName "SightOCR"
 #ifndef MyAppVersion
-#define MyAppVersion "2.0.1"
+#define MyAppVersion "2.0.2"
 #endif
 #define MyAppPublisher "FueTsui"
 #define MyAppURL "https://github.com/FueTsui/SightOCR"
@@ -18,7 +18,8 @@ UsePreviousTasks=no
 DefaultDirName={#SmokeInstallDir}
 #else
 AppId={{B5261760-0D41-4798-9917-D5AA8C2510C8}}
-DefaultDirName={localappdata}\Programs\{#MyAppName}
+DefaultDirName={autopf}\{#MyAppName}
+UsePreviousAppDir=no
 #endif
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
@@ -40,7 +41,11 @@ Compression=lzma2
 SolidCompression=yes
 OutputDir=dist\installer
 UninstallDisplayIcon={app}\{#MyAppExeName}
+#ifdef SmokeTest
 PrivilegesRequired=lowest
+#else
+PrivilegesRequired=admin
+#endif
 MinVersion=10.0
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -56,10 +61,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "chinesesimplified"; MessagesFile: "scripts\installer\ChineseSimplified.isl"
 
 [Tasks]
+Name: "runasadmin"; Description: "{cm:RunAsAdmin}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "autostart"; Description: "{cm:AutoStart}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "startmenu"; Description: "{cm:CreateStartMenuIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [CustomMessages]
+english.RunAsAdmin=Always run SightOCR as administrator (Windows confirmation required at startup)
+chinesesimplified.RunAsAdmin=始终以管理员身份运行 SightOCR（启动时需要 Windows 确认）
+english.AutoStart=Start SightOCR when I sign in
+chinesesimplified.AutoStart=开机自动启动 SightOCR
+
 english.CreateStartMenuIcon=Create a Start Menu shortcut
 chinesesimplified.CreateStartMenuIcon=创建开始菜单快捷方式
 english.CloseRunningApp=SightOCR is currently running. Click OK to close it automatically and continue. Unsaved recognition results will be lost. Click Cancel to exit Setup.
@@ -68,12 +80,13 @@ english.CloseRunningAppFailed=SightOCR could not exit within the allowed time. N
 chinesesimplified.CloseRunningAppFailed=SightOCR 未能在规定时间内退出，尚未替换任何文件。请通过托盘菜单退出 SightOCR 后重试。
 english.ProcessCheckFailed=Unable to check running processes. No files have been replaced. Please retry Setup.
 chinesesimplified.ProcessCheckFailed=无法检查正在运行的程序，尚未替换任何文件。请重新运行安装程序。
-english.CloseConsoleBeforeUpdate=SightOCR CLI or MCP is running in this installation. Stop it in your terminal or MCP client, then retry the update. No files have been replaced.
-chinesesimplified.CloseConsoleBeforeUpdate=此安装目录的 SightOCR CLI 或 MCP 正在运行。请在终端或 MCP 客户端停止服务后重试更新，尚未替换任何文件。
+english.CloseConsoleBeforeUpdate=SightOCR MCP is running in this installation. Stop it in your terminal or MCP client, then retry the update. No files have been replaced.
+chinesesimplified.CloseConsoleBeforeUpdate=此安装目录的 SightOCR MCP 正在运行。请在终端或 MCP 客户端停止服务后重试更新，尚未替换任何文件。
 
 [Files]
+Source: "{#PackageDir}\skills\*"; DestDir: "{app}\skills"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#PackageDir}\SightOCR.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#PackageDir}\sightocr-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#PackageDir}\sightocr-mcp.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PackageDir}\docs\*.md"; DestDir: "{app}\docs"; Flags: ignoreversion
@@ -86,6 +99,22 @@ Source: "{#PackageDir}\resources\oneocr\oneocr.onemodel"; DestDir: "{app}\resour
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: startmenu
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 #endif
+
+[InstallDelete]
+Type: files; Name: "{app}\sightocr-cli.exe"
+Type: files; Name: "{app}\docs\CLI_MCP.md"
+
+[UninstallDelete]
+Type: files; Name: "{app}\run-as-admin"
+
+#ifdef SmokeTest
+#define StartupKey "Software\SightOCR.InstallerSmoke\Run"
+#else
+#define StartupKey "Software\Microsoft\Windows\CurrentVersion\Run"
+#endif
+[Registry]
+Root: HKCU; Subkey: "{#StartupKey}"; ValueType: string; ValueName: "SightOCR"; ValueData: """{app}\SightOCR.exe"" --silent"; Tasks: autostart; Flags: uninsdeletevalue; Check: not IsUpdateMode
+Root: HKCU; Subkey: "{#StartupKey}"; ValueType: none; ValueName: "SightOCR"; Tasks: not autostart; Flags: deletevalue; Check: not IsUpdateMode
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent; Check: not IsUpdateMode
@@ -138,6 +167,8 @@ begin
       Result := True;
 end;
 
+#include "scripts/installer/PreviousVersions.iss"
+
 function IsTargetProcess(Process: THandle): Boolean;
 var
   Name: String;
@@ -150,7 +181,9 @@ begin
     Exit;
   SetLength(Name, Size);
   Result := (CompareText(Name, ExpandConstant('{app}\{#MyAppExeName}')) = 0) or
-    (CompareText(Name, ExpandConstant('{app}\sightocr-cli.exe')) = 0);
+    ((CompareText(Name, ExpandConstant('{app}\sightocr-mcp.exe')) = 0) or
+    (CompareText(Name, ExpandConstant('{app}\sightocr-cli.exe')) = 0)) or
+    IsPreviousExecutable(Name, False);
 end;
 
 function IsConsoleProcess(Process: THandle): Boolean;
@@ -164,7 +197,9 @@ begin
   if not QueryFullProcessImageName(Process, 0, Name, Size) then
     Exit;
   SetLength(Name, Size);
-  Result := CompareText(Name, ExpandConstant('{app}\sightocr-cli.exe')) = 0;
+  Result := (CompareText(Name, ExpandConstant('{app}\sightocr-mcp.exe')) = 0) or
+    (CompareText(Name, ExpandConstant('{app}\sightocr-cli.exe')) = 0) or
+    IsPreviousExecutable(Name, True);
 end;
 
 procedure RequestGracefulExit(ProcessId: DWORD);
@@ -287,7 +322,8 @@ begin
   Result := True;
   if CurPageID <> wpReady then
     Exit;
-  Error := CloseRunningApp;
+  Error := FindPreviousVersions;
+  if Error = '' then Error := CloseRunningApp;
   Result := Error = '';
   if ShutdownCancelled then
     WizardForm.Close
@@ -306,7 +342,9 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   { Also catches silent installs and an app started after the Ready page. }
-  Result := CloseRunningApp;
+  Result := FindPreviousVersions;
+  if Result = '' then Result := CloseRunningApp;
+  if Result = '' then Result := RemovePreviousVersions;
 end;
 
 function InitializeUninstall: Boolean;
@@ -333,3 +371,35 @@ begin
     RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', '{#MyAppName}');
 end;
 
+
+procedure InitializeWizard;
+begin
+  { Inno Setup restores the previous runasadmin task on interactive upgrades. }
+  if RegValueExists(HKCU, '{#StartupKey}', 'SightOCR') then
+    WizardSelectTasks(WizardSelectedTasks(False) + ',autostart');
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  SettingPath: String;
+begin
+  { Updates retain the installed choice. Apply before the post-install launch. }
+  if CurStep <> ssPostInstall then
+    Exit;
+  SettingPath := ExpandConstant('{app}\run-as-admin');
+  if IsUpdateMode then begin
+    if RestoreAdminAfterUpdate and not SaveStringToFile(SettingPath, '1', False) then
+      RaiseException('Cannot restore administrator startup setting.');
+    if RestoreStartupAfterUpdate and not RegWriteStringValue(HKCU, '{#StartupKey}',
+      'SightOCR', '"' + ExpandConstant('{app}\SightOCR.exe') + '" --silent') then
+      RaiseException('Cannot restore startup setting.');
+    Exit;
+  end;
+  if WizardIsTaskSelected('runasadmin') then begin
+    if not SaveStringToFile(SettingPath, '1', False) then
+      RaiseException('Cannot save administrator startup setting.');
+  end else if FileExists(SettingPath) then begin
+    if not DeleteFile(SettingPath) then
+      RaiseException('Cannot remove administrator startup setting.');
+  end;
+end;

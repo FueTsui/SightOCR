@@ -1,6 +1,6 @@
 [package]
 name = "sightocr"
-version = "2.0.1"
+version = "2.0.2"
 authors = ["FueTsui"]
 edition = "2021"
 rust-version = "1.88"
@@ -17,7 +17,7 @@ name = "SightOCR"
 path = "rust/main.rs"
 
 [[bin]]
-name = "sightocr-cli"
+name = "sightocr-mcp"
 path = "rust/console.rs"
 
 [dependencies]

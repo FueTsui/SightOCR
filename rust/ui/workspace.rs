@@ -876,7 +876,7 @@ fn content_kind(selection: &str) -> usize {
     }
 }
 const OCR_PROVIDERS: &[&str] = &[
-    "本地 OneOCR",
+    "本地 OCR",
     "百度 OCR",
     "腾讯 OCR",
     "Mistral OCR",
