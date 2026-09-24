@@ -386,3 +386,267 @@ fn system_environment_child() -> Result<()> {
         .is_err());
     Ok(())
 }
+
+#[test]
+fn system_proxy_changes_are_followed_without_restarting_services() -> Result<()> {
+    // RegOverridePredefKey and environment edits are process-wide, so run this
+    // test alone in a child with its own HKCU sandbox, never the user's settings.
+    let mut child = Command::new(std::env::current_exe()?);
+    child
+        .args([
+            "--exact",
+            "services::proxy_tests::system_changes_child",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("SIGHTOCR_SYSTEM_CHANGES_TEST", "1");
+    for name in [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "REQUEST_METHOD",
+    ] {
+        child.env_remove(name);
+    }
+    let output = child.output()?;
+    assert!(
+        output.status.success(),
+        "system changes child failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+struct IsolatedInternetSettings {
+    root: windows_sys::Win32::System::Registry::HKEY,
+    settings: windows_sys::Win32::System::Registry::HKEY,
+}
+
+impl IsolatedInternetSettings {
+    fn new() -> Result<Self> {
+        use windows_sys::Win32::System::Registry::*;
+        let path: Vec<u16> = format!("Software\\SightOCR-Proxy-Test-{}", std::process::id())
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        let mut root = std::ptr::null_mut();
+        // SAFETY: Valid terminated path and output handle. Volatile test key
+        // is separate from the real Internet Settings and opened in this child.
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                REG_OPTION_VOLATILE,
+                KEY_ALL_ACCESS,
+                std::ptr::null(),
+                &mut root,
+                std::ptr::null_mut(),
+            )
+        };
+        anyhow::ensure!(status == 0, "create test registry root: {status}");
+        let mut sandbox = Self {
+            root,
+            settings: std::ptr::null_mut(),
+        };
+        // SAFETY: Redirect only this isolated test process's predefined HKCU.
+        let status = unsafe { RegOverridePredefKey(HKEY_CURRENT_USER, root) };
+        anyhow::ensure!(status == 0, "override test HKCU: {status}");
+        let path: Vec<u16> = system_proxy::SETTINGS_KEY
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: All pointers are valid and HKCU now refers to our sandbox.
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                REG_OPTION_VOLATILE,
+                KEY_ALL_ACCESS,
+                std::ptr::null(),
+                &mut sandbox.settings,
+                std::ptr::null_mut(),
+            )
+        };
+        anyhow::ensure!(status == 0, "create test Internet Settings: {status}");
+        Ok(sandbox)
+    }
+
+    fn set(&self, name: &str, kind: u32, data: &[u8]) {
+        use windows_sys::Win32::System::Registry::RegSetValueExW;
+        let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: This key belongs to the sandbox; name and byte buffer live
+        // through the synchronous call and data length matches the buffer.
+        let status = unsafe {
+            RegSetValueExW(
+                self.settings,
+                name.as_ptr(),
+                0,
+                kind,
+                data.as_ptr(),
+                data.len() as u32,
+            )
+        };
+        assert_eq!(status, 0);
+    }
+
+    fn enabled(&self, enabled: bool) {
+        self.set(
+            "ProxyEnable",
+            windows_sys::Win32::System::Registry::REG_DWORD,
+            &u32::from(enabled).to_le_bytes(),
+        );
+    }
+
+    fn text(&self, name: &str, value: &str) {
+        let bytes: Vec<u8> = value
+            .encode_utf16()
+            .chain(Some(0))
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        self.set(name, windows_sys::Win32::System::Registry::REG_SZ, &bytes);
+    }
+}
+
+impl Drop for IsolatedInternetSettings {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Registry::*;
+        let path: Vec<u16> = format!("Software\\SightOCR-Proxy-Test-{}", std::process::id())
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: Restore HKCU before deleting only the unique test subtree.
+        // These handles are owned here and no services are using them on drop.
+        unsafe {
+            RegOverridePredefKey(HKEY_CURRENT_USER, std::ptr::null_mut());
+            if !self.settings.is_null() {
+                RegCloseKey(self.settings);
+            }
+            RegDeleteTreeW(self.root, std::ptr::null());
+            RegCloseKey(self.root);
+            RegDeleteKeyW(HKEY_CURRENT_USER, path.as_ptr());
+        }
+    }
+}
+
+fn expect_direct(services: &mut Services, config: &Config) -> Result<()> {
+    let (origin, handle) = listener(|mut stream| {
+        let mut record = [0; 3];
+        stream.read_exact(&mut record).unwrap();
+        record
+    });
+    let mut config = config.clone();
+    config.mistral_base_url = format!("https://{origin}/v1");
+    assert!(services.ocr(b"synthetic", "Mistral_auto", &config).is_err());
+    let hello = handle.join().unwrap();
+    assert_eq!(&hello[..2], &[0x16, 0x03]);
+    Ok(())
+}
+
+#[test]
+#[ignore = "invoked in isolation by system_proxy_changes_are_followed_without_restarting_services"]
+fn system_changes_child() -> Result<()> {
+    if std::env::var("SIGHTOCR_SYSTEM_CHANGES_TEST").as_deref() != Ok("1") {
+        return Ok(());
+    }
+    let registry = IsolatedInternetSettings::new()?;
+    let (first, first_request) = rejecting_proxy();
+    registry.text("ProxyServer", &format!("http://{first}"));
+    registry.enabled(true);
+    let mut services = Services::new()?;
+    let config = Config {
+        mistral_base_url: "https://system-change.invalid/v1".into(),
+        mistral_api_key: "synthetic".into(),
+        ..Config::default()
+    };
+    assert!(services.ocr(b"synthetic", "Mistral_auto", &config).is_err());
+    assert!(first_request
+        .join()
+        .unwrap()
+        .starts_with("CONNECT system-change.invalid:443 "));
+
+    // Stable configuration must preserve cached sessions.
+    services.baidu_token = Some(Token {
+        credentials: [1; 32],
+        value: "synthetic".into(),
+        expires: Instant::now() + Duration::from_secs(60),
+    });
+    services.configure_proxy(&config.proxy)?;
+    assert!(services.baidu_token.is_some());
+
+    // The old proxy has closed: disabling must reach the origin directly.
+    registry.enabled(false);
+    assert!(
+        system_proxy::Snapshot::capture() != services.system_proxy,
+        "disable changes snapshot"
+    );
+    expect_direct(&mut services, &config)?;
+    assert!(services.baidu_token.is_none());
+
+    // Re-enable at another port, exercising the translation entry too.
+    let (second, second_request) = rejecting_proxy();
+    registry.text("ProxyServer", &format!("http://{second}"));
+    registry.enabled(true);
+    assert!(services.translate("synthetic", &config).is_err());
+    assert!(second_request
+        .join()
+        .unwrap()
+        .starts_with("CONNECT www.bing.com:443 "));
+
+    // Changing only ProxyServer while still enabled also discards the client.
+    let (third, third_request) = rejecting_proxy();
+    registry.text("ProxyServer", &format!("http://{third}"));
+    assert!(services.ocr(b"synthetic", "Mistral_auto", &config).is_err());
+    assert!(third_request
+        .join()
+        .unwrap()
+        .starts_with("CONNECT system-change.invalid:443 "));
+
+    // Changing only the bypass list must apply to the very next task.
+    registry.text("ProxyOverride", "127.0.0.1");
+    expect_direct(&mut services, &config)?;
+
+    // Environment proxy changes retain the documented precedence and refresh.
+    registry.text("ProxyOverride", "");
+    let (environment, environment_request) = rejecting_proxy();
+    std::env::set_var("HTTPS_PROXY", format!("http://{environment}"));
+    assert!(services.ocr(b"synthetic", "Mistral_auto", &config).is_err());
+    assert!(environment_request
+        .join()
+        .unwrap()
+        .starts_with("CONNECT system-change.invalid:443 "));
+    std::env::set_var("NO_PROXY", "127.0.0.1");
+    expect_direct(&mut services, &config)?;
+    std::env::remove_var("HTTPS_PROXY");
+    std::env::remove_var("NO_PROXY");
+
+    // Explicit Direct/Manual must not respond to external system changes.
+    for proxy in [
+        ProxyConfig {
+            mode: ProxyMode::Direct,
+            ..ProxyConfig::default()
+        },
+        manual(first),
+    ] {
+        services.configure_proxy(&proxy)?;
+        services.baidu_token = Some(Token {
+            credentials: [2; 32],
+            value: "synthetic".into(),
+            expires: Instant::now() + Duration::from_secs(60),
+        });
+        registry.enabled(false);
+        services.configure_proxy(&proxy)?;
+        assert!(services.baidu_token.is_some());
+        registry.enabled(true);
+    }
+    Ok(())
+}

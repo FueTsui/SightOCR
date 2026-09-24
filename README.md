@@ -1,6 +1,6 @@
 # SightOCR
 
-2.0.2：安装前识别并卸载用户目录及系统目录中的旧版，兼容历史卸载登记键名；默认安装到 Program Files，可勾选始终以管理员身份运行。界面统一显示“本地 OCR”，移除重复运行版本信息。旧截图残留按 72 小时保留、每 24 小时清理；源码与开发流程已移除 Python。
+2.0.3：修复运行期间切换 Windows 系统代理后仍沿用旧连接的问题，新任务自动刷新代理与服务会话；精简常规设置中的两条辅助说明。
 
 Windows 截图识别与翻译工具，现采用 **Rust + egui + Win32** 重写，运行时不需要 Python、Qt、NumPy 或 OpenCV。
 
@@ -10,7 +10,7 @@ Windows 截图识别与翻译工具，现采用 **Rust + egui + Win32** 重写�
 
 ## 运行
 
-运行 `dist\installer\SightOCR-Setup-2.0.2.exe` 安装；也可双击 `启动.bat`，或运行便携目录中的 `dist\SightOCR\SightOCR.exe`。2.0.1 加固系统托盘生命周期，并包含 MCP、正文编辑、中文拼音组合输入与 Bing 地区跳转修复。从源码启动且尚未构建时，脚本会调用 Cargo 构建 Release。要求 Windows 10/11 x64。安装、升级和卸载说明见 [Windows 安装包](docs/INSTALLATION.md)。
+运行 `dist\installer\SightOCR-Setup-2.0.3.exe` 安装；也可双击 `启动.bat`，或运行便携目录中的 `dist\SightOCR\SightOCR.exe`。2.0.1 加固系统托盘生命周期，并包含 MCP、正文编辑、中文拼音组合输入与 Bing 地区跳转修复。从源码启动且尚未构建时，脚本会调用 Cargo 构建 Release。要求 Windows 10/11 x64。安装、升级和卸载说明见 [Windows 安装包](docs/INSTALLATION.md)。
 
 | 操作 | 功能 |
 | --- | --- |
@@ -82,7 +82,7 @@ Windows 截图识别与翻译工具，现采用 **Rust + egui + Win32** 重写�
 
 | 模式 | 行为 |
 | --- | --- |
-| 跟随系统 | 优先读取代理环境变量，随后读取 Windows 手动代理设置；不执行 PAC 脚本或 WPAD 自动发现。 |
+| 跟随系统 | 每次新任务前检查代理环境变量与 Windows 手动代理设置，变化时刷新连接与服务会话，无需重启。环境变量优先；不执行 PAC 脚本或 WPAD 自动发现。 |
 | 不使用代理 | SightOCR 直接连接云端服务。 |
 | 手动代理 | 使用指定的 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理，例如 `http://127.0.0.1:7890`。 |
 
