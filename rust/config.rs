@@ -171,6 +171,9 @@ pub struct Config {
     pub hide_tray_icon: bool,
     pub replace_newline: bool,
     pub autostart: bool,
+    // The installation marker is authoritative; never persist a per-user override.
+    #[serde(skip_serializing)]
+    pub run_as_admin: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -208,6 +211,7 @@ impl Default for Config {
             hide_tray_icon: false,
             replace_newline: false,
             autostart: false,
+            run_as_admin: false,
             extra: BTreeMap::new(),
         }
     }

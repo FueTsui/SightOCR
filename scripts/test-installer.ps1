@@ -68,7 +68,7 @@ function Test-InstallerShutdown {
         if (-not (Test-Path (Join-Path $previousDir 'user-note.txt'))) { throw 'User file removed by migration.' }
         if (-not (Get-ChildItem (Join-Path $fixtureInstall 'upgrade-backup') -Recurse -Filter config.json)) { throw 'Legacy config backup missing.' }
     } finally {
-        Remove-Item -LiteralPath $previousKey -Recurse
+        if (Test-Path -LiteralPath $previousKey) { Remove-Item -LiteralPath $previousKey -Recurse }
     }
     Copy-Item -LiteralPath $fixtureExe -Destination (Join-Path $otherInstall 'SightOCR.exe')
     function Start-Fixture([string]$Directory, [string]$Executable = 'SightOCR.exe') {
@@ -145,7 +145,7 @@ function Test-InstallerShutdown {
             New-ItemProperty $previousKey InstallLocation -Value $fixtureInstall -Force | Out-Null
             New-ItemProperty $previousKey UninstallString -Value ('"' + (Join-Path $fixtureInstall 'unins000.exe') + '"') -Force | Out-Null
             Run-Hidden $fixtureInstaller ($silentArguments + '/UPDATE' + ('/LOG="' + (Join-Path $fixtureRoot 'update.log') + '"'))
-        } finally { Remove-Item -LiteralPath $previousKey -Recurse }
+        } finally { if (Test-Path -LiteralPath $previousKey) { Remove-Item -LiteralPath $previousKey -Recurse } }
         if ([IO.File]::ReadAllText($adminSetting) -ne '1') { throw 'Update did not preserve administrator startup setting.' }
         if ((Get-ItemPropertyValue $migrationStartup SightOCR) -ne $migrationCommand) { throw 'Uninstall-before-update lost startup.' }
         Remove-Item -LiteralPath $migrationStartup -Recurse
@@ -171,7 +171,46 @@ function Test-InstallerShutdown {
             if ($blocked.HasExited -or (Get-FileHash -LiteralPath $protectedFile -Algorithm SHA256).Hash -ne $protectedHash) { throw 'Timed-out update terminated the app or replaced files.' }
             $timeoutResult = 'Passed: installer failed without terminating the app or replacing files.'
         }
-        [pscustomobject]@{ Complete = $true; PreviousVersionUninstalled = $true; InvalidRegistrationStopsInstall = $true; LegacyConfigurationBackedUp = $true; UserFilesPreserved = $true; UpdatePreservesAdminAndStartup = $true; CancelPreservesApp = $true; NoUnapprovedSilentShutdown = $true; ConfirmedGracefulExit = $true; ConfirmedLegacyExit = $true; UpdateGracefulExitAndSingleRestart = $true; OtherInstallationPreserved = $true; UpdateTimeout = $timeoutResult } |
+        # Reproduce the reported HKCU/HKLM conflict in isolated registry roots,
+        # in both enumeration orders, using the old updater's explicit /DIR.
+        $machineKey = 'HKCU:\Software\SightOCR.InstallerSmoke\MachineUninstall\{B5261760-0D41-4798-9917-D5AA8C2510C8}}_is1'
+        if (Test-Path -LiteralPath $machineKey) { throw 'Unexpected machine fixture registration.' }
+        $legacyUser = Join-Path $fixtureInstall 'legacy-user'
+        $newDefault = Join-Path $fixtureInstall 'program-files'
+        $legacyArguments = @($silentArguments | Where-Object { $_ -notlike '/DIR=*' }) + ('/DIR="' + $legacyUser + '"')
+        $migrationStartup = 'HKCU:\Software\SightOCR.InstallerSmoke\Run'
+        foreach ($validUser in @($true, $false)) {
+            Run-Hidden $fixtureInstaller $legacyArguments
+            [IO.File]::WriteAllText((Join-Path $legacyUser 'config.json'), '{"keep_after_migration":true}')
+            [IO.File]::WriteAllText((Join-Path $legacyUser 'run-as-admin'), '1')
+            New-Item -Path $migrationStartup -Force | Out-Null
+            New-ItemProperty $migrationStartup SightOCR -Value ('"' + (Join-Path $legacyUser 'SightOCR.exe') + '" --silent') -Force | Out-Null
+            try {
+                foreach ($registryKey in @($previousKey, $machineKey)) {
+                    New-Item -Path $registryKey -Force | Out-Null
+                    New-ItemProperty $registryKey DisplayName -Value 'SightOCR 版本 2.0.2' -Force | Out-Null
+                    New-ItemProperty $registryKey InstallLocation -Value ($legacyUser + '\') -Force | Out-Null
+                    $isValid = ($registryKey -eq $previousKey) -eq $validUser
+                    $uninstallerName = if ($isValid) { 'unins000.exe' } else { 'unins001.exe' }
+                    New-ItemProperty $registryKey UninstallString -Value ('"' + (Join-Path $legacyUser $uninstallerName) + '"') -Force | Out-Null
+                }
+                Run-Hidden $fixtureInstaller ($legacyArguments + '/UPDATE')
+                if (Test-Path (Join-Path $legacyUser 'SightOCR.exe')) { throw 'Legacy /DIR was not migrated.' }
+                if (-not (Test-Path (Join-Path $newDefault 'SightOCR.exe'))) { throw 'Program Files destination was not used.' }
+                if ((Test-Path $previousKey) -or (Test-Path $machineKey)) { throw 'Duplicate uninstall registration remains.' }
+                if ([IO.File]::ReadAllText((Join-Path $legacyUser 'config.json')) -ne '{"keep_after_migration":true}') { throw 'Migration lost config.' }
+                if ([IO.File]::ReadAllText((Join-Path $newDefault 'run-as-admin')) -ne '1') { throw 'Migration lost administrator setting.' }
+                if ((Get-ItemPropertyValue $migrationStartup SightOCR) -ne ('"' + (Join-Path $newDefault 'SightOCR.exe') + '" --silent')) { throw 'Startup still points at the old directory.' }
+                Stop-Fixture $newDefault
+                Run-Hidden (Join-Path $newDefault 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+            } finally {
+                Stop-Fixture $newDefault
+                foreach ($registryKey in @($previousKey, $machineKey, $migrationStartup)) {
+                    if (Test-Path -LiteralPath $registryKey) { Remove-Item -LiteralPath $registryKey -Recurse }
+                }
+            }
+        }
+        [pscustomobject]@{ Complete = $true; DuplicateRegistrationBothOrders = $true; LegacyUpdateDirMigrated = $true; MigratedAdminAndStartupPreserved = $true; CustomUpdateDirectoryPreserved = $true; PreviousVersionUninstalled = $true; InvalidRegistrationStopsInstall = $true; LegacyConfigurationBackedUp = $true; UserFilesPreserved = $true; UpdatePreservesAdminAndStartup = $true; CancelPreservesApp = $true; NoUnapprovedSilentShutdown = $true; ConfirmedGracefulExit = $true; ConfirmedLegacyExit = $true; UpdateGracefulExitAndSingleRestart = $true; OtherInstallationPreserved = $true; UpdateTimeout = $timeoutResult } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $fixtureRoot 'report.json') -Encoding UTF8
     } finally {
         Stop-Fixture $fixtureInstall
@@ -233,6 +272,13 @@ if ((Get-ItemPropertyValue $startupTestPath SightOCR) -ne $expectedStartup) { th
 Run-Hidden $installer $installArguments
 if (Get-ItemProperty $startupTestPath -Name SightOCR -ErrorAction SilentlyContinue) { throw 'Unchecked startup option did not remove value.' }
 Run-Hidden $installer ($withStartup + '/TASKS=autostart,runasadmin')
+# Exercise the fixed-purpose helper shipped in the real GUI binary. These
+# writable, isolated paths require no UAC and cannot affect the live install.
+$installedGui = Join-Path $installRoot 'SightOCR.exe'
+Run-Hidden $installedGui @('--set-run-as-admin', 'off')
+if (Test-Path -LiteralPath $adminSetting) { throw 'Administrator settings helper did not disable the installer marker.' }
+Run-Hidden $installedGui @('--set-run-as-admin', 'on')
+if ([IO.File]::ReadAllText($adminSetting).Trim() -ne '1') { throw 'Administrator settings helper did not enable the installer marker.' }
 # Exercise the real console host, which has no GUI graceful-exit message.
 # Automatic update must fail promptly without closing it or replacing payload.
 $consoleStart = [Diagnostics.ProcessStartInfo]::new()
@@ -294,6 +340,7 @@ if ([IO.File]::ReadAllText($configSentinel) -ne $configText) { throw 'Uninstalla
 if (Test-Path -LiteralPath $smokeRegistryPath) { throw 'Smoke uninstall registration was left behind.' }
 [pscustomobject]@{
     StartupCheckedUncheckedAndUninstall = $true
+    AdministratorSettingsHelperRoundtrip = $true
     AdminCheckedUncheckedUpdateAndUninstall = $true
     Complete = $true
     Version = $version

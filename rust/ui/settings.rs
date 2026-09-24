@@ -166,6 +166,7 @@ impl App {
         startup_card(
             ui,
             p,
+            &mut self.draft.run_as_admin,
             &mut self.draft.autostart,
             &mut self.draft.hide_tray_icon,
         );
@@ -279,34 +280,28 @@ impl App {
     fn proxy_settings(&mut self, ui: &mut egui::Ui, p: &Palette) {
         card(ui, p, |ui| {
             let control_width = 210.0_f32.min(ui.available_width() * 0.45);
-            let label_width = ui.available_width() - control_width - ui.spacing().item_spacing.x;
             ui.horizontal(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(label_width, ui.spacing().interact_size.y),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.set_width(label_width);
-                        ui.label(RichText::new("代理模式").size(14.0).color(p.text));
-                    },
-                );
-                let selected = match self.draft.proxy.mode {
-                    ProxyMode::System => "跟随系统（默认）",
-                    ProxyMode::Direct => "不使用代理",
-                    ProxyMode::Manual => "手动代理",
-                };
-                egui::ComboBox::from_id_salt("settings_proxy_mode")
-                    .icon(theme::combo_icon)
-                    .width(control_width)
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        for (mode, label) in [
-                            (ProxyMode::System, "跟随系统（默认）"),
-                            (ProxyMode::Direct, "不使用代理"),
-                            (ProxyMode::Manual, "手动代理"),
-                        ] {
-                            ui.selectable_value(&mut self.draft.proxy.mode, mode, label);
-                        }
-                    });
+                ui.label(RichText::new("代理模式").size(14.0).color(p.text));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let selected = match self.draft.proxy.mode {
+                        ProxyMode::System => "跟随系统（默认）",
+                        ProxyMode::Direct => "不使用代理",
+                        ProxyMode::Manual => "手动代理",
+                    };
+                    egui::ComboBox::from_id_salt("settings_proxy_mode")
+                        .icon(theme::combo_icon)
+                        .width(control_width)
+                        .selected_text(selected)
+                        .show_ui(ui, |ui| {
+                            for (mode, label) in [
+                                (ProxyMode::System, "跟随系统（默认）"),
+                                (ProxyMode::Direct, "不使用代理"),
+                                (ProxyMode::Manual, "手动代理"),
+                            ] {
+                                ui.selectable_value(&mut self.draft.proxy.mode, mode, label);
+                            }
+                        });
+                });
             });
         });
         ui.add_space(4.0);
@@ -511,23 +506,17 @@ fn appearance_card(ui: &mut egui::Ui, p: &Palette, config: &mut Config) {
     let choices = &[("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")];
     card(ui, p, |ui| {
         let control_width = 180.0_f32.min(ui.available_width() * 0.4);
-        let label_width = ui.available_width() - control_width - ui.spacing().item_spacing.x;
         ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(label_width, ui.spacing().interact_size.y),
-                Layout::left_to_right(Align::Center),
-                |ui| {
-                    ui.set_width(label_width);
-                    ui.label(RichText::new("应用主题").size(14.0).color(p.text));
-                },
-            );
-            select_choice(
-                ui,
-                "settings_appearance",
-                &mut selected,
-                choices,
-                control_width,
-            );
+            ui.label(RichText::new("应用主题").size(14.0).color(p.text));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                select_choice(
+                    ui,
+                    "settings_appearance",
+                    &mut selected,
+                    choices,
+                    control_width,
+                );
+            });
         });
     });
     if selected != initial {
@@ -626,18 +615,20 @@ fn hotkey_field(
 
 fn output_card(ui: &mut egui::Ui, p: &Palette, replace_newline: &mut bool) {
     card(ui, p, |ui| {
-        toggle_row(
-            ui,
-            p,
-            replace_newline,
-            "合并文本换行",
-            "将普通文本合并为一行，表格仍保留行列结构。",
-        );
+        toggle_row(ui, p, replace_newline, "合并文本换行", "");
     });
 }
 
-fn startup_card(ui: &mut egui::Ui, p: &Palette, autostart: &mut bool, hide_tray: &mut bool) {
+fn startup_card(
+    ui: &mut egui::Ui,
+    p: &Palette,
+    run_as_admin: &mut bool,
+    autostart: &mut bool,
+    hide_tray: &mut bool,
+) {
     card(ui, p, |ui| {
+        toggle_row(ui, p, run_as_admin, "以管理员运行", "");
+        ui.separator();
         toggle_row(ui, p, autostart, "开机自动启动", "");
         ui.separator();
         toggle_row(ui, p, hide_tray, "隐藏托盘图标", "");
@@ -648,14 +639,7 @@ fn toggle_row(ui: &mut egui::Ui, p: &Palette, value: &mut bool, label: &str, hel
     ui.horizontal(|ui| {
         let text_width = (ui.available_width() - 40.0 - ui.spacing().item_spacing.x).max(100.0);
         if help.is_empty() {
-            ui.allocate_ui_with_layout(
-                egui::vec2(text_width, ui.spacing().interact_size.y),
-                Layout::left_to_right(Align::Center),
-                |ui| {
-                    ui.set_width(text_width);
-                    ui.label(RichText::new(label).size(14.0).color(p.text));
-                },
-            );
+            ui.label(RichText::new(label).size(14.0).color(p.text));
         } else {
             ui.allocate_ui_with_layout(
                 egui::vec2(text_width, 0.0),
@@ -666,46 +650,54 @@ fn toggle_row(ui: &mut egui::Ui, p: &Palette, value: &mut bool, label: &str, hel
                 },
             );
         }
-        let (rect, mut response) = ui.allocate_exact_size(egui::vec2(40.0, 20.0), Sense::click());
-        if response.clicked() {
-            *value = !*value;
-            response.mark_changed();
-        }
-        response.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, label)
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let (rect, mut response) =
+                ui.allocate_exact_size(egui::vec2(40.0, 20.0), Sense::click());
+            if response.clicked() {
+                *value = !*value;
+                response.mark_changed();
+            }
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Checkbox,
+                    ui.is_enabled(),
+                    *value,
+                    label,
+                )
+            });
+            let amount = ui.ctx().animate_bool(response.id, *value);
+            ui.painter()
+                .rect_filled(rect, 10, if *value { p.accent } else { p.panel_alt });
+            if !*value {
+                ui.painter().rect_stroke(
+                    rect,
+                    10,
+                    Stroke::new(1.0_f32, p.muted),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let center = egui::pos2(
+                egui::lerp((rect.left() + 10.0)..=(rect.right() - 10.0), amount),
+                rect.center().y,
+            );
+            ui.painter().circle_filled(
+                center,
+                if response.hovered() { 6.5 } else { 6.0 },
+                if *value { p.panel } else { p.muted },
+            );
+            if response.has_focus() {
+                ui.painter().rect_stroke(
+                    rect.expand(2.0),
+                    4,
+                    Stroke::new(1.0_f32, p.accent),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+            if !help.is_empty() {
+                response.on_hover_text(help);
+            }
         });
-        let amount = ui.ctx().animate_bool(response.id, *value);
-        ui.painter()
-            .rect_filled(rect, 10, if *value { p.accent } else { p.panel_alt });
-        if !*value {
-            ui.painter().rect_stroke(
-                rect,
-                10,
-                Stroke::new(1.0_f32, p.muted),
-                egui::StrokeKind::Inside,
-            );
-        }
-        let center = egui::pos2(
-            egui::lerp((rect.left() + 10.0)..=(rect.right() - 10.0), amount),
-            rect.center().y,
-        );
-        ui.painter().circle_filled(
-            center,
-            if response.hovered() { 6.5 } else { 6.0 },
-            if *value { p.panel } else { p.muted },
-        );
-        if response.has_focus() {
-            ui.painter().rect_stroke(
-                rect.expand(2.0),
-                4,
-                Stroke::new(1.0_f32, p.accent),
-                egui::StrokeKind::Outside,
-            );
-        }
-        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-        if !help.is_empty() {
-            response.on_hover_text(help);
-        }
     });
 }
 
