@@ -615,13 +615,7 @@ fn hotkey_field(
 
 fn output_card(ui: &mut egui::Ui, p: &Palette, replace_newline: &mut bool) {
     card(ui, p, |ui| {
-        toggle_row(
-            ui,
-            p,
-            replace_newline,
-            "合并文本换行",
-            "将普通文本合并为一行，表格仍保留行列结构。",
-        );
+        toggle_row(ui, p, replace_newline, "合并文本换行", "");
     });
 }
 
@@ -634,11 +628,6 @@ fn startup_card(
 ) {
     card(ui, p, |ui| {
         toggle_row(ui, p, run_as_admin, "以管理员运行", "");
-        ui.label(
-            RichText::new("保存后下次启动生效；启用后启动时需确认 Windows 权限提示。")
-                .size(12.0)
-                .color(p.muted),
-        );
         ui.separator();
         toggle_row(ui, p, autostart, "开机自动启动", "");
         ui.separator();

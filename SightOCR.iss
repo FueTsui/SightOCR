@@ -1,6 +1,6 @@
 #define MyAppName "SightOCR"
 #ifndef MyAppVersion
-#define MyAppVersion "2.0.2"
+#define MyAppVersion "2.0.3"
 #endif
 #define MyAppPublisher "FueTsui"
 #define MyAppURL "https://github.com/FueTsui/SightOCR"

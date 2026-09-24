@@ -18,6 +18,7 @@ mod ai;
 mod bing;
 #[cfg(test)]
 mod proxy_tests;
+mod system_proxy;
 
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TABLE_CELLS: usize = 100_000;
@@ -117,6 +118,7 @@ pub(crate) fn apply_proxy(builder: ClientBuilder, config: &ProxyConfig) -> Resul
 pub struct Services {
     client: Client,
     proxy: ProxyConfig,
+    system_proxy: Option<system_proxy::Snapshot>,
     baidu_token: Option<Token>,
     bing_session: Option<BingSession>,
 }
@@ -124,17 +126,29 @@ pub struct Services {
 impl Services {
     pub fn new() -> Result<Self> {
         let proxy = ProxyConfig::default();
+        let system_proxy = system_proxy::Snapshot::capture();
         let client = build_client(&proxy)?;
         Ok(Self {
             client,
             proxy,
+            system_proxy,
             baidu_token: None,
             bing_session: None,
         })
     }
 
     fn configure_proxy(&mut self, proxy: &ProxyConfig) -> Result<()> {
-        if &self.proxy == proxy {
+        // reqwest snapshots system settings when building a client. Recheck at
+        // each task boundary so an unchanged "System" mode cannot pin an old
+        // proxy/CONNECT tunnel after Windows settings change.
+        let system_proxy = if proxy.mode == ProxyMode::System {
+            system_proxy::Snapshot::capture()
+        } else {
+            None
+        };
+        let system_unchanged = proxy.mode != ProxyMode::System
+            || (system_proxy.is_some() && system_proxy == self.system_proxy);
+        if &self.proxy == proxy && system_unchanged {
             return Ok(());
         }
         // Build first: invalid settings must fail this task instead of silently
@@ -142,6 +156,7 @@ impl Services {
         let client = build_client(proxy)?;
         self.client = client;
         self.proxy = proxy.clone();
+        self.system_proxy = system_proxy;
         self.baidu_token = None;
         self.bing_session = None;
         Ok(())
