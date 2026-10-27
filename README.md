@@ -1,158 +1,211 @@
+<div align="center">
+
+<img src="assets/icon.png" width="96" alt="SightOCR">
+
 # SightOCR
 
-2.0.3：修复运行期间切换 Windows 系统代理后仍沿用旧连接的问题，新任务自动刷新代理与服务会话；精简常规设置中的两条辅助说明。
+**Windows 截图识别与翻译工具**
 
-Windows 截图识别与翻译工具，现采用 **Rust + egui + Win32** 重写，运行时不需要 Python、Qt、NumPy 或 OpenCV。
+框选屏幕即可识别文字、表格和公式，一键翻译并复制。本地离线识别，也可接入百度、腾讯与各类大模型接口。
 
-本地 stdio MCP 使用 `sightocr-mcp.exe`，配套通用 Skill 随安装包提供。参见 [MCP 与 Skill 使用说明](docs/MCP.md)。
+[![Release](https://img.shields.io/github/v/release/FueTsui/SightOCR?label=%E4%B8%8B%E8%BD%BD)](https://github.com/FueTsui/SightOCR/releases/latest)
+[![CI](https://github.com/FueTsui/SightOCR/actions/workflows/rust.yml/badge.svg)](https://github.com/FueTsui/SightOCR/actions/workflows/rust.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-0078D4)
+![Rust](https://img.shields.io/badge/rust-1.88%2B-orange)
 
-原文和译文均可手动编辑：空白区点击后立即进入输入状态，清空文本后仍可继续输入。已修复拼音首字母输入后候选窗口立即关闭的问题；输入法组合期间保留临时文本和选区，选词提交后再更新正文格式。默认 Bing 翻译已支持授权页在可信 Bing HTTPS 站点间的地区跳转，并保持对应站点的会话。
+[下载](https://github.com/FueTsui/SightOCR/releases/latest) · [使用说明](docs/USAGE.md) · [安装与升级](docs/INSTALLATION.md) · [MCP 与 Skill](docs/MCP.md)
 
-## 运行
+</div>
 
-运行 `dist\installer\SightOCR-Setup-2.0.3.exe` 安装；也可双击 `启动.bat`，或运行便携目录中的 `dist\SightOCR\SightOCR.exe`。2.0.1 加固系统托盘生命周期，并包含 MCP、正文编辑、中文拼音组合输入与 Bing 地区跳转修复。从源码启动且尚未构建时，脚本会调用 Cargo 构建 Release。要求 Windows 10/11 x64。安装、升级和卸载说明见 [Windows 安装包](docs/INSTALLATION.md)。
+<p align="center">
+  <img src="docs/screenshots/2.1.0/result.png" width="40%" alt="识别结果">
+  &nbsp;
+  <img src="docs/screenshots/2.1.0/dark.png" width="57%" alt="深色主题下的原文与译文对照">
+</p>
 
-| 操作 | 功能 |
+## ✨ 特性
+
+- **三种识别类型**：文字、表格（输出 TSV，可直接粘贴到 Excel）、公式（输出 LaTeX）。
+- **本地离线识别**：默认使用本地 OneOCR 引擎（来自 Windows 截图工具），截图只在内存中处理，不联网。
+- **表格还原**：支持浅色、断线、深色主题、斑马纹、轻微倾斜和斜拍照片等表格。
+- **版面分析**：识别双栏排版与段落，把因宽度换行的行合并成整段，方便翻译。
+- **多种翻译服务**：Bing（默认，免密钥）、百度、腾讯，以及自定义的大模型接口。
+- **模型接口**：支持 OpenAI Chat Completions 兼容、OpenAI Responses、Anthropic Messages、Google Gemini、Mistral OCR 五种协议，可接入 Azure OpenAI、DeepSeek、通义千问、腾讯混元、Ollama、LM Studio 等。
+- **多语言显示**：原生 Unicode 编辑控件，支持阿拉伯文等双向排版、印度及东南亚文字和输入法。
+- **静默识别**：一键框选，结果直接进剪贴板，不弹窗口。
+- **MCP 服务**：附带 `sightocr-mcp.exe` 和通用 Skill，让 AI 客户端调用识别与翻译。
+- **轻量**：Rust + egui + Win32 编写，无需 Python、Qt 或其他运行时；日常运行无需管理员权限。
+
+## 📥 安装
+
+从 [Releases](https://github.com/FueTsui/SightOCR/releases/latest) 下载 `SightOCR-Setup-<版本号>.exe` 并运行。
+
+- 系统要求：Windows 10 / 11 x64
+- 默认安装到 `C:\Program Files\SightOCR`，覆盖安装会保留设置、密钥与快捷方式
+- 程序内可自动检查更新，下载后校验 SHA256 再安装
+- 可用发布附件 `SHA256SUMS.txt` 核对安装包
+
+安装、升级、静默安装参数与卸载说明见 [Windows 安装包](docs/INSTALLATION.md)。
+
+## 🚀 使用
+
+启动后程序常驻托盘，通过快捷键随时截图：
+
+| 快捷键 | 功能 |
 | --- | --- |
-| F4（默认） | 静默框选识别并复制原文，不弹出结果窗口 |
-| F5（默认） | 框选识别，显示结果并复制原文 |
-| F2（默认） | 框选识别、翻译并复制译文 |
-| Esc / 鼠标右键 | 取消截图 |
-| 界面「输入文字」 | 编辑原文并提交翻译 |
-| 关闭窗口 | 隐藏窗口并继续在后台运行，与托盘图标显示或系统集成服务是否可用无关 |
-| 工具栏图钉 / 齿轮 | 切换窗口置顶 / 直接打开设置 |
-| 托盘菜单「退出」 | 退出并释放资源 |
+| <kbd>F4</kbd> | 静默识别：框选后直接复制原文，不弹出窗口 |
+| <kbd>F5</kbd> | 截图识别：显示结果并复制原文 |
+| <kbd>F2</kbd> | 截图翻译：识别、翻译并复制译文 |
+| <kbd>Esc</kbd> / 鼠标右键 | 取消截图 |
 
-支持自定义快捷键、接口与语言选择、窗口置顶、主题切换、用户级开机自启。无须管理员权限。原文框可编辑换行，点击「翻译原文」提交。处理期间不会重复排队；取消后立即恢复操作，保留已显示的文本，可马上开始新任务。后台识别进程及其网络连接会被终止，迟到结果不会覆盖新任务。
+- 快捷键可在「设置 → 快捷键」中修改，直接按下组合键即可录入。
+- 工具栏可切换识别类型（文字 / 表格 / 公式）和识别引擎（本地 / 云端）。
+- 原文与译文都可编辑，修改后点击「翻译原文」重新翻译。
+- 关闭窗口只是隐藏到后台；从托盘菜单「退出」才会结束程序。
 
-修改快捷键时，在「设置 → 快捷键」按顺序录入静默识别、截图识别、截图翻译三项快捷键。点击对应控件后直接按下单键或组合键，无需手动输入 `Ctrl+F4` 等文字。三项不能使用相同的按键组合；录入结果先保留在设置草稿中，保存成功后才生效，取消设置或保存失败时保持原快捷键。
+### 识别引擎
 
-## 桌面界面
+| | 本地 OneOCR | 百度 / 腾讯 | 模型接口 |
+| --- | :---: | :---: | :---: |
+| 文字 | ✅ | ✅ | ✅ |
+| 表格 | ✅ | ✅ | ✅ |
+| 公式 | — | ✅ | ✅ |
+| 翻译 | — | ✅ | ✅ |
+| 需要联网 / 密钥 | 否 | 是 | 是（本机模型可免密钥） |
 
-界面参考 Windows 11 截图工具：顶部紧凑工具栏、蓝色模式指示、浅色画布和居中快捷键提示。识别完成后先展示原文，继续翻译时在译文区域显示等待状态。保留系统标题栏、拖动、调整大小、最小化和最大化；标题栏随浅色/深色主题同步，也可选择跟随系统。原文与译文使用 Windows 原生 Unicode 编辑控件，支持多语言字体回退、阿拉伯文/波斯文等双向排版、印度及东南亚文字连写和输入法；界面字体同时补齐各可选语言的系统字体回退。复制和翻译使用原始字符顺序。
+云端识别失败时会显示原因并回退到本地引擎。
 
-- **工具栏**：「新建」开始截图，旁边切换截图识别/截图并翻译模式；选择文字、表格、公式类型及本地/云端引擎。右侧图钉切换窗口置顶，齿轮直接打开设置；识别精度保留在引擎选择中。
-- **原文 / 译文**：默认宽度使用紧凑分页，窗口加宽后可左右对照。语言选择、复制和翻译操作放在对应区域，文本可独立滚动，底部操作保持可见。
-- **设置**：按顺序包含常规、接口、快捷键、代理、关于五页，「返回」与导航位于同一行。常规直接展示应用主题、合并文本换行、开机自动启动和隐藏托盘图标，移除分组标题；接口通过七项服务选择器切换凭据与模型表单；快捷键独立成页，直接展示三项录入控件，位于接口与代理之间；关于页提供版本和配置位置，移除产品简介与自动更新流程说明，退出操作位于托盘菜单。语言与翻译服务在工作台选择。底部固定「保存」与「取消」按钮，外观与快捷键在保存成功后生效。
-- **任务反馈**：普通识别与翻译的等待页显示当前阶段、提交任务时选定的服务与目标语言、已用时间和取消入口。截图并翻译会先展示识别原文，再等待译文。取消后忽略迟到的进度与完成事件；处理期间锁定输入，避免结果覆盖正在编辑的文字。
+### 配置云端服务
 
-桌面界面专注截图与文字输入，已移除图片导入和拖放识别。文件识别可通过 MCP 的 `sightocr_ocr` 工具调用，支持 PNG、JPEG、BMP、WebP。
+在「设置 → 接口」中填写百度、腾讯的密钥，或选择「＋ 添加模型接口」。「快速填入」可一键带出常见服务商的地址和默认模型，填上密钥并点「测试」即可使用。
 
-托盘悬停提示仅显示「SightOCR」。托盘菜单按顺序包含「主界面、静默识别、截图识别、截图翻译、设置、重启、退出」七项。三项截图操作旁显示当前生效的快捷键；设置保存成功后同步更新，保存失败时保留原快捷键。重启会先释放窗口、任务与热键，再启动新进程。
+<p align="center">
+  <img src="docs/screenshots/2.1.0/model-interface.png" width="70%" alt="设置中的模型接口配置">
+</p>
 
-「隐藏托盘图标」仅控制图标显示。关闭主窗口始终隐藏到后台，即使系统集成服务初始化失败也不退出；服务可用时全局快捷键继续响应，`--silent` 启动同样保持隐藏。正常情况下再次运行 SightOCR 可打开已有实例。托盘「退出」明确结束进程，「重启」结束当前进程后重新启动；这些动作与关闭窗口分别处理。
+网络代理在「设置 → 代理」中配置，支持跟随系统、直连和手动指定 HTTP / SOCKS5 代理。
 
-普通识别完成时恢复并将结果窗口移至普通窗口最前方，保留用户调整的尺寸、最大化状态和置顶选择；静默识别不自动打开窗口。设置页已移除冗余说明，「获取密钥」直接打开对应官方控制台。设置滚动条使用圆角滑块、明显的浅深主题对比与悬停展开，滚动区保留固定边距。
+更多细节——表格识别规则、版面分析、各协议的请求格式、代理与配置文件——见 [使用说明](docs/USAGE.md)。
 
-主窗口客户区默认 740×680、最小 740×580 逻辑像素，可调整大小和最大化，未设置最大尺寸限制。默认尺寸在 150% 缩放下对应 1110×1020 物理像素。初始位置在当前显示器工作区居中，避开任务栏占用区域。视觉规范和验证范围见 [界面设计记录](docs/UI_DESIGN.md)。
+## 🤖 MCP 与 Skill
 
-程序/托盘图标使用 `assets/icon.ico`，窗口与关于页使用 `assets/icon.png`，截图光标使用 `assets/cursor/cross.png`。资源直接嵌入程序，发布后无需另外复制 assets 目录。
+`sightocr-mcp.exe` 是本地 stdio MCP 服务，无需参数，不监听网络端口：
 
-工具栏、全局快捷键和托盘菜单发起截图时，可见的主窗口先最小化并隐藏，再进入框选；已隐藏到托盘的窗口保持隐藏，直接进入框选。普通识别和截图并翻译在框选完成后恢复主窗口，显示等待页与结果。
+```json
+{
+  "mcpServers": {
+    "sightocr": {
+      "command": "C:\\Program Files\\SightOCR\\sightocr-mcp.exe",
+      "args": []
+    }
+  }
+}
+```
 
-静默识别仍显示框选覆盖层，成功后自动复制原文，不进行翻译，也不自动弹出等待页或文字结果窗口。进度、取消与失败均不自动恢复主窗口；可通过托盘「主界面」或「设置」主动打开。静默仅作用于本次请求，下一次普通识别或翻译仍正常显示界面。启动参数 `--silent` 则表示启动后收起到托盘，与单次静默识别分别控制。
+提供 `sightocr_ocr`（本地识别图片）、`sightocr_translate`（翻译文本）、`sightocr_languages`（列出语言）三个工具。安装目录中的 `skills/sightocr/SKILL.md` 是配套的通用 Skill。详见 [MCP 与 Skill](docs/MCP.md)。
 
-框选样式沿用旧版：1px 纯白边框，选区外保持原图一半亮度，选区内显示清晰原图。预览在离屏缓冲中完成合成，再一次提交到窗口，避免先显示暗层、后显示选区造成的闪烁；原始截图保持只读。
+## 🛠️ 从源码构建
 
-默认本地 OneOCR，截图只在内存中处理。可选百度、腾讯、Mistral、OpenAI、NVIDIA 进行云端文字、表格或公式识别。本地表格输出 TSV，可粘贴到 Excel。云端 OCR 失败时显示原因并回退本地，保留接口选择；公式回退只能获得普通文字。
+**准备环境**
 
-百度、腾讯公式识别结果采用与 Mistral 示例一致的 LaTeX 显示块格式：每个公式用独立行的 `\[` 和 `\]` 包裹，多公式之间保留空行，便于复制到支持 LaTeX 的编辑器。
+- [Rust MSVC 工具链](https://rust-lang.org/tools/install/)（1.88 或更高）
+- [Visual Studio C++ Build Tools 与 Windows SDK](https://learn.microsoft.com/en-us/windows/dev-environment/rust/setup)
+- OneOCR 资源：源码不包含 OneOCR 的 DLL 与模型，可运行 `tests/ExtractOCR.bat` 从本机截图工具中提取到 `resources/oneocr/`（需要管理员权限）
 
-本地表格结合自适应局部对比度、多尺度水平/垂直线检测与文字位置推断，改善浅色、短线、断线和部分边框表格的行列还原，并保留空白内列。只有外框的表格会继续按文字行分组。倾斜表格及复杂合并单元格仍需校对。
-
-在「设置 → 关于」点击「检查更新」会检查 GitHub 正式版本；发现更高版本后后台下载，验证大小和 SHA256，随后自动安装到当前程序目录并重新启动。更新沿用已保存的网络代理设置，失败时在关于页显示原因并可重试。安装包只接受本项目对应版本的 `SightOCR-Setup-版本号.exe`，缺少有效校验信息时不执行安装。发布新版本时应同时上传 `SHA256SUMS.txt`。普通安装遇到目标目录内正在运行的程序会提示确认，确定后自动关闭并继续安装；完成页默认勾选启动。
-
-翻译支持 Bing、百度、腾讯、OpenAI、NVIDIA；Mistral 仅用于 OCR。默认 Bing 使用微软网页翻译的兼容接口，已替换实测返回 404 的旧 Edge 授权地址。云端服务需要网络及对应权限/配额，除 Bing 外需在设置中填写相应密钥。网页接口的可用性取决于服务方。相同源/目标语言保持原文。
-
-新增服务在「设置 → 接口」中分别配置 API Key、Base URL 和模型。三家服务的凭据独立保存；OpenAI 与 NVIDIA 各自共用本服务的密钥和地址，并分别设置识别模型与翻译模型。
-
-| 服务 | 用途 | 默认 Base URL | 默认模型 |
-| --- | --- | --- | --- |
-| Mistral OCR | OCR | `https://api.mistral.ai/v1` | `mistral-ocr-latest` |
-| OpenAI | OCR、翻译 | `https://api.openai.com/v1` | 两项均为 `gpt-4.1-mini` |
-| NVIDIA | OCR、翻译 | `https://integrate.api.nvidia.com/v1` | 两项均为 `qwen/qwen3.5-122b-a10b` |
-
-地址与模型留空时回填默认值，自定义识别模型需支持图片输入。接口协议已依据官方文档核对；新增服务尚未使用真实密钥发起请求，账号权限、模型可用性及实际输出仍需在目标账号验证。
-
-协议参考：[Mistral OCR](https://docs.mistral.ai/api/endpoint/ocr)、[OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat)、[NVIDIA Qwen3.5](https://docs.api.nvidia.com/nim/reference/qwen-qwen3-5-122b-a10b-infer)。自定义 Base URL 应填写包含版本路径的 HTTPS 地址，例如 `https://api.example.com/v1`，无需追加 `/chat/completions` 或 `/ocr`。
-
-## 代理
-
-在「设置 → 代理」选择连接方式，默认跟随系统：
-
-| 模式 | 行为 |
-| --- | --- |
-| 跟随系统 | 每次新任务前检查代理环境变量与 Windows 手动代理设置，变化时刷新连接与服务会话，无需重启。环境变量优先；不执行 PAC 脚本或 WPAD 自动发现。 |
-| 不使用代理 | SightOCR 直接连接云端服务。 |
-| 手动代理 | 使用指定的 HTTP、HTTPS、SOCKS5 或 SOCKS5H 代理，例如 `http://127.0.0.1:7890`。 |
-
-代理认证的用户名和密码分别填写，密码默认遮罩；无需认证时留空。切换到系统或直连模式后，手动字段禁用并保留已填内容。该设置仅作用于 SightOCR 的云端识别与翻译，不修改 Windows 或其他应用的代理设置；保存后对新任务生效，本地 OCR 无需网络。
-
-## 配置
-
-- 默认保存到 `%APPDATA%\SightOCR\config.json`，避免安装目录写入权限问题。
-- 首次运行导入程序/源码目录的旧 `config.json`，兼容 `paths.json` 的 `config_dir`；保留未知字段，原文件不改动。
-- 兼容旧版语言显示名和 `last_source_lang` / `last_target_lang`。
-- 旧配置缺少静默快捷键时自动补齐：普通识别为旧默认 F4、且翻译未占用 F5 时，将普通识别改为 F5，静默识别使用 F4。其他原有识别/翻译组合优先保留；若 F4 已被这两项占用，新静默键从 F6 至 F24 依次选择不重复的按键。已经保存的三项快捷键不会再次重置；其他程序占用导致的注册冲突仍需在设置中调整。
-- 同目录临时写入、同步并原子替换；损坏配置不会被默认值覆盖，需修复后重启。
-- `SIGHTOCR_CONFIG` 指定独立配置文件并跳过旧配置迁移；`SIGHTOCR_RESOURCES` 指定包含 DLL/模型的目录。
-- 服务密钥和代理认证保存在本机 JSON，密码与密钥在界面掩码显示，不输出到日志；并非加密凭据库。
-
-## 构建
-
-安装 [Rust MSVC 工具链](https://rust-lang.org/tools/install/) 与 [Visual Studio C++ Build Tools / Windows SDK](https://learn.microsoft.com/en-us/windows/dev-environment/rust/setup)。OneOCR 资源要求 Windows x64。提交的 `Cargo.lock` 固定依赖版本。
+**开发与检查**
 
 ```powershell
 cargo run --locked --bin SightOCR
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-cargo build --release --locked
+cargo test --locked -- --test-threads=1
+```
 
-# 检查、测试、构建并复制资源到 dist/SightOCR
+**打包**
+
+```powershell
+# 检查、测试、构建，并把程序和资源复制到 dist/SightOCR
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1
-# 首次可在工作区准备官方 Inno Setup 6 编译器
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-installer.ps1
-# 额外生成安装包
+
+# 额外生成安装包 dist/installer/SightOCR-Setup-<版本号>.exe（使用自带安装程序，无需 Inno Setup）
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Installer
 ```
 
-构建脚本串行运行测试，避免原生字体/焦点测试争用 Windows 桌面状态。缺少 Windows 补充字体的验证机可显式传入 `-SkipOptionalFontTests`，只排除两项广泛语言字形覆盖测试；默认不排除，使用该选项时须在验证记录标明字体边界。
+<details>
+<summary>构建说明</summary>
 
-若 Cargo 未加入 PATH，可使用 `$env:USERPROFILE\.cargo\bin\cargo.exe`；脚本会自动寻找该位置。安装包按用户安装。图标、版本号和 DPI manifest 嵌入 EXE；用户配置不随包发布。关于页可检查、下载并验证更高的正式版本，随后自动安装。
+- 构建脚本串行运行测试，避免原生字体/焦点测试争用 Windows 桌面状态。
+- 缺少 Windows 补充字体的验证机可传入 `-SkipOptionalFontTests`，只排除两项多语言字形覆盖测试；使用该选项时须在验证记录中注明。
+- Cargo 未加入 PATH 时，脚本会自动寻找 `$env:USERPROFILE\.cargo\bin\cargo.exe`。
+- 图标、版本号和 DPI manifest 嵌入 EXE；用户配置不随包发布。
+- 公开 CI 运行默认测试；依赖补充字体和交互桌面的测试默认忽略，需在配置完整的 Windows 机器上串行执行。
+- 其他回归脚本：`scripts/test-mcp.ps1`、`scripts/test-installer.ps1`（需 PowerShell 7，隔离验证安装 / 升级 / 卸载及 2.0.x 程序内更新兼容）、`scripts/test-updater.ps1`。
+- 公开源码不包含 OneOCR 资源，也不包含真实业务表格及其派生夹具。
+- 本地私有表格样本回归需备齐夹具后运行 `cargo test --locked --features private-table-samples -- --test-threads=1`；公开源码的默认检查不依赖这些文件。
 
-公开源码不包含 OneOCR DLL/模型或真实业务表格及派生夹具。可使用 `tests/ExtractOCR.bat` 从本机截图工具提取所需资源。公开 CI 运行默认测试；依赖补充字体和交互桌面的测试保持显式忽略，应在配置完整的 Windows 验证机上串行执行。
+</details>
 
-## MCP 与 Skill
-
-通过 `sightocr-mcp.exe` 连接 stdio MCP，启动参数为空。配套 `skills/sightocr/SKILL.md` 引导 AI 客户端调用 OCR、翻译和语言查询工具。详见 [MCP 与 Skill](docs/MCP.md)。
-
-## 结构
+<details>
+<summary>项目结构</summary>
 
 ```text
-rust/main.rs       GUI 入口
-rust/headless.rs   MCP 无界面识别与翻译任务
-rust/mcp.rs        本地 stdio MCP 协议与工具
-rust/app.rs        应用状态、任务与系统事件
-rust/ui/           工作台、设置、主题与原生窗口样式
-rust/ui_smoke.rs   隔离配置的桌面界面冒烟验证
-rust/worker.rs     有界队列、图像加载、引擎调度
-rust/config.rs     验证、迁移、原子保存
-rust/services.rs   云端 OCR、翻译、签名、令牌
-rust/services/ai.rs Mistral OCR 与 OpenAI/NVIDIA 识别、翻译协议
-rust/ocr.rs        OneOCR FFI 与 COM 生命周期
-rust/ocr/table.rs  本地表格恢复
-rust/platform.rs  截图、热键、托盘、自启、单实例
-scripts/           启动与构建
-resources/oneocr/  原有 DLL 与模型
+rust/
+├── main.rs            GUI 入口
+├── console.rs         sightocr-mcp.exe 入口
+├── app.rs             应用状态、任务与系统事件
+├── config.rs          配置验证、迁移与原子保存
+├── headless.rs        MCP 无界面识别与翻译任务
+├── mcp.rs             本地 stdio MCP 协议与工具
+├── ocr.rs             OneOCR FFI 与 COM 生命周期
+├── ocr/               本地表格恢复与版面分析
+├── platform.rs        截图、热键、托盘、自启、单实例
+├── services.rs        云端 OCR、翻译、签名与令牌
+├── services/ai.rs     模型接口（Chat / Responses / Anthropic / Gemini / Mistral OCR）
+├── ui/                工作台、设置、主题与原生窗口样式
+├── updater.rs         软件更新
+└── worker.rs          有界队列、图像加载与引擎调度
+scripts/               启动、构建与回归测试脚本
+skills/sightocr/       配套通用 Skill
+resources/oneocr/      OneOCR DLL 与模型（不随源码提供）
 ```
 
-项目已移除旧 Python 源码、字节码、依赖清单与启动入口，开发和构建使用 Rust 与 PowerShell。MCP 进程回归可执行 `scripts/test-mcp.ps1`。
+</details>
 
-当前截图仅在内存和匿名管道中传递，识别后不会留下临时截图文件。程序启动时及每 24 小时检查旧版缓存：仅删除 `%TEMP%\SightOCR\screenshots` 和 `%TEMP%` 中命名为 `sight_YYYYMMDD_HHMMSS.png`、超过 72 小时的文件，不递归删除目录，不删除用户导入或保存的图片。
+## 📚 文档
 
-重构问题清单和人工回归项目见 [重构记录](docs/RUST_REFACTOR.md)，实测结果见 [验证记录](docs/VALIDATION.md)。本地复杂合并/倾斜表格仍属于启发式恢复；多屏混合 DPI、远程桌面和云端账号权限需在目标环境验证。
+| 文档 | 内容 |
+| --- | --- |
+| [使用说明](docs/USAGE.md) | 各项功能的详细行为 |
+| [Windows 安装包](docs/INSTALLATION.md) | 安装、升级、程序内更新与卸载 |
+| [MCP 与 Skill](docs/MCP.md) | MCP 配置、工具列表与排错 |
+| [界面设计记录](docs/UI_DESIGN.md) | 视觉规范与验证范围 |
+| [重构记录](docs/RUST_REFACTOR.md) | Rust 重写的问题清单与人工回归项 |
+| [验证记录](docs/VALIDATION.md) | 各版本实测结果 |
 
-此前窗口缩放和截图时序修复继续保留。2.0.1 的托盘循环、窗口后台恢复、构建及安装验证以[验证记录](docs/VALIDATION.md)和发布附件 `VALIDATION.json` 为准；下载后可使用 `SHA256SUMS.txt` 核对安装包。
+## ⚠️ 已知限制
 
-SightOCR 第一方代码作者及版权归属为 FueTsui，采用 [MIT 许可](LICENSE)。现有 OneOCR DLL/模型及其他第三方组件保留各自的作者、版权和许可。
+- 本地引擎不支持公式识别，请使用云端服务。
+- 强烈透视或弯曲的照片、看不清的斜线表头、复杂合并单元格需要人工校对。
+- 多屏混合 DPI、远程桌面和云端账号权限需在实际环境中验证。
+- 服务密钥以明文保存在本机配置文件中（界面中遮罩显示），并非加密存储。
+- Arm64 Windows 的 x64 模拟环境尚未验证。
+
+## 📝 更新日志
+
+**2.1.0**
+- 原 Mistral、OpenAI、NVIDIA 固定接口统一为可自定义名称的「模型接口」，支持五种标准协议，用于识别（文字 / 表格 / 公式）与翻译；旧配置自动迁移。
+- 设置页增加服务商快速填入、请求地址实时校验与连接测试。
+- 本地表格识别支持深色主题与斑马纹表格；中文、日文单元格换行不再插入多余空格。
+- 优化按钮、切换、复制反馈、等待页等动效，并遵循 Windows「显示动画」设置。
+
+**2.0.3**
+- 修复运行期间切换 Windows 系统代理后仍沿用旧连接的问题，新任务自动刷新代理与服务会话。
+
+完整历史见 [Releases](https://github.com/FueTsui/SightOCR/releases)。
+
+## 📄 许可
+
+SightOCR 第一方代码由 FueTsui 编写，采用 [MIT 许可](LICENSE)。
+
+OneOCR DLL / 模型及其他第三方组件保留各自的作者、版权和许可。

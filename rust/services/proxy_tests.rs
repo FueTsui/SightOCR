@@ -1,12 +1,45 @@
 //! Local socket tests exercise the real connector without TLS bypasses or cloud calls.
 
 use super::*;
+use crate::config::{
+    ModelProfile, ModelProtocol, MISTRAL_BASE_URL, MISTRAL_OCR_MODEL, NVIDIA_BASE_URL,
+    NVIDIA_OCR_MODEL, OPENAI_BASE_URL, OPENAI_MODEL,
+};
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     process::Command,
     thread::{self, JoinHandle},
 };
+
+/// A model interface with a synthetic key, as migrated from the former fixed providers.
+fn interface(
+    id: &str,
+    protocol: ModelProtocol,
+    base: &str,
+    ocr: &str,
+    translate: &str,
+) -> ModelProfile {
+    ModelProfile {
+        id: id.into(),
+        name: id.into(),
+        protocol,
+        base_url: base.into(),
+        api_key: "synthetic".into(),
+        ocr_model: ocr.into(),
+        translate_model: translate.into(),
+    }
+}
+
+fn mistral(base: &str) -> Vec<ModelProfile> {
+    vec![interface(
+        "mistral",
+        ModelProtocol::MistralOcr,
+        base,
+        MISTRAL_OCR_MODEL,
+        "",
+    )]
+}
 
 fn listener<T: Send + 'static>(
     handler: impl FnOnce(TcpStream) -> T + Send + 'static,
@@ -113,17 +146,37 @@ fn every_public_cloud_entry_uses_the_changed_proxy() -> Result<()> {
         tencent_secret_key: "synthetic".into(),
         tencent_trans_secret_id: "synthetic".into(),
         tencent_trans_secret_key: "synthetic".into(),
-        mistral_api_key: "synthetic".into(),
-        openai_api_key: "synthetic".into(),
-        nvidia_api_key: "synthetic".into(),
+        model_profiles: vec![
+            interface(
+                "mistral",
+                ModelProtocol::MistralOcr,
+                MISTRAL_BASE_URL,
+                MISTRAL_OCR_MODEL,
+                "",
+            ),
+            interface(
+                "openai",
+                ModelProtocol::OpenaiChat,
+                OPENAI_BASE_URL,
+                OPENAI_MODEL,
+                OPENAI_MODEL,
+            ),
+            interface(
+                "nvidia",
+                ModelProtocol::OpenaiChat,
+                NVIDIA_BASE_URL,
+                NVIDIA_OCR_MODEL,
+                NVIDIA_OCR_MODEL,
+            ),
+        ],
         ..Config::default()
     };
     for (selection, host) in [
         ("Baidu_auto", "aip.baidubce.com"),
         ("Tencent_auto", "ocr.tencentcloudapi.com"),
-        ("Mistral_auto", "api.mistral.ai"),
-        ("OpenAI_auto", "api.openai.com"),
-        ("Nvidia_auto", "integrate.api.nvidia.com"),
+        ("Model.mistral_auto", "api.mistral.ai"),
+        ("Model.openai_auto", "api.openai.com"),
+        ("Model.nvidia_auto", "integrate.api.nvidia.com"),
     ] {
         let (address, handle) = rejecting_proxy();
         config.proxy = manual(address);
@@ -139,8 +192,8 @@ fn every_public_cloud_entry_uses_the_changed_proxy() -> Result<()> {
         ("Baidu", "api.fanyi.baidu.com"),
         ("Tencent", "tmt.tencentcloudapi.com"),
         ("默认", "www.bing.com"),
-        ("OpenAI", "api.openai.com"),
-        ("Nvidia", "integrate.api.nvidia.com"),
+        ("Model.openai", "api.openai.com"),
+        ("Model.nvidia", "integrate.api.nvidia.com"),
     ] {
         let (address, handle) = rejecting_proxy();
         config.proxy = manual(address);
@@ -241,7 +294,7 @@ fn cancelled_entry_does_not_apply_a_pending_proxy_change() -> Result<()> {
         ..Config::default()
     };
     assert!(services
-        .ocr_cancellable(b"image", "OpenAI_auto", &config, &|| true)
+        .ocr_cancellable(b"image", "Model.openai_auto", &config, &|| true)
         .unwrap_err()
         .to_string()
         .contains("取消"));
@@ -377,12 +430,11 @@ fn system_environment_child() -> Result<()> {
             url: "inactive invalid draft".into(),
             ..ProxyConfig::default()
         },
-        mistral_base_url: "https://system-proxy-target.invalid/v1".into(),
-        mistral_api_key: "synthetic".into(),
+        model_profiles: mistral("https://system-proxy-target.invalid/v1"),
         ..Config::default()
     };
     assert!(Services::new()?
-        .ocr(b"image", "Mistral_auto", &config)
+        .ocr(b"image", "Model.mistral_auto", &config)
         .is_err());
     Ok(())
 }
@@ -545,8 +597,10 @@ fn expect_direct(services: &mut Services, config: &Config) -> Result<()> {
         record
     });
     let mut config = config.clone();
-    config.mistral_base_url = format!("https://{origin}/v1");
-    assert!(services.ocr(b"synthetic", "Mistral_auto", &config).is_err());
+    config.model_profiles = mistral(&format!("https://{origin}/v1"));
+    assert!(services
+        .ocr(b"synthetic", "Model.mistral_auto", &config)
+        .is_err());
     let hello = handle.join().unwrap();
     assert_eq!(&hello[..2], &[0x16, 0x03]);
     Ok(())
@@ -564,17 +618,25 @@ fn system_changes_child() -> Result<()> {
     registry.enabled(true);
     let mut services = Services::new()?;
     let config = Config {
-        mistral_base_url: "https://system-change.invalid/v1".into(),
-        mistral_api_key: "synthetic".into(),
+        model_profiles: mistral("https://system-change.invalid/v1"),
         ..Config::default()
     };
-    assert!(services.ocr(b"synthetic", "Mistral_auto", &config).is_err());
+    assert!(services
+        .ocr(b"synthetic", "Model.mistral_auto", &config)
+        .is_err());
     assert!(first_request
         .join()
         .unwrap()
         .starts_with("CONNECT system-change.invalid:443 "));
 
-    // Stable configuration must preserve cached sessions.
+    // A network failure makes the next task start over with new connections…
+    assert!(
+        services.reconnect,
+        "a failed connection schedules a reconnect"
+    );
+    services.configure_proxy(&config.proxy)?;
+    assert!(!services.reconnect);
+    // …after which a stable configuration must preserve cached sessions.
     services.baidu_token = Some(Token {
         credentials: [1; 32],
         value: "synthetic".into(),
@@ -605,7 +667,9 @@ fn system_changes_child() -> Result<()> {
     // Changing only ProxyServer while still enabled also discards the client.
     let (third, third_request) = rejecting_proxy();
     registry.text("ProxyServer", &format!("http://{third}"));
-    assert!(services.ocr(b"synthetic", "Mistral_auto", &config).is_err());
+    assert!(services
+        .ocr(b"synthetic", "Model.mistral_auto", &config)
+        .is_err());
     assert!(third_request
         .join()
         .unwrap()
@@ -619,7 +683,9 @@ fn system_changes_child() -> Result<()> {
     registry.text("ProxyOverride", "");
     let (environment, environment_request) = rejecting_proxy();
     std::env::set_var("HTTPS_PROXY", format!("http://{environment}"));
-    assert!(services.ocr(b"synthetic", "Mistral_auto", &config).is_err());
+    assert!(services
+        .ocr(b"synthetic", "Model.mistral_auto", &config)
+        .is_err());
     assert!(environment_request
         .join()
         .unwrap()

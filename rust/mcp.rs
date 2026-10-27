@@ -1,7 +1,7 @@
 //! A bounded MCP stdio server for SightOCR's three synchronous tools.
 //! Implements the 2025-11-25 / 2025-06-18 lifecycle and tools subset. No HTTP,
 //! resources, prompts, sampling, tasks, or configuration mutation are advertised.
-use crate::headless::{self, Headless, MAX_TEXT_BYTES, PROVIDERS};
+use crate::headless::{self, Headless, MAX_TEXT_BYTES, PROVIDER_PATTERN};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -242,12 +242,12 @@ impl Server {
         }
         let result = match name {
             "sightocr_ocr" => serde_json::from_value::<OcrArgs>(arguments)
-                .map_err(|_| anyhow::anyhow!("Expected image_path (non-empty string) and optional table (boolean); no extra fields"))
+                .map_err(|_| anyhow::anyhow!("Expected image_path (non-empty string) and optional table, layout (booleans); no extra fields"))
                 .and_then(|args| {
                     anyhow::ensure!(!args.image_path.trim().is_empty() && args.image_path.len() <= 32767 && !args.image_path.chars().any(char::is_control), "Invalid local image path");
                     anyhow::ensure!(!args.image_path.starts_with("\\\\") && !args.image_path.starts_with("//"), "Use a local disk image path, not a network or device path");
                     anyhow::ensure!(std::path::Path::new(&args.image_path).is_absolute(), "image_path must be an absolute Windows file path");
-                    self.headless.ocr(std::path::Path::new(&args.image_path), args.table)
+                    self.headless.ocr(std::path::Path::new(&args.image_path), args.table, args.layout)
                 }),
             "sightocr_translate" => serde_json::from_value::<TranslateArgs>(arguments)
                 .map_err(|_| anyhow::anyhow!("Expected text and optional source_lang, target_lang, provider strings; no extra fields"))
@@ -276,6 +276,8 @@ struct OcrArgs {
     image_path: String,
     #[serde(default)]
     table: bool,
+    #[serde(default)]
+    layout: bool,
 }
 
 #[derive(Deserialize)]
@@ -320,7 +322,8 @@ fn tool_definitions() -> Value {
             "description":"Recognize text or TSV table content in a local Windows image file with OneOCR. Always local: the image is never sent to any online service, regardless of saved OCR settings. Supports PNG, JPEG, BMP, WebP; file limit 64 MiB and 100 million pixels. No UI, clipboard, or settings changes.",
             "inputSchema":{"type":"object", "properties":{
                 "image_path":{"type":"string", "minLength":1, "maxLength":32767, "description":"Absolute Windows disk file path (for example C:\\Pictures\\image.png); URLs and UNC/device paths are rejected. Mapped drives use the host's existing filesystem access."},
-                "table":{"type":"boolean", "default":false, "description":"Return table rows as TSV, preserving tabs and newlines."}
+                "table":{"type":"boolean", "default":false, "description":"Return table rows as TSV, preserving tabs and newlines."},
+                "layout":{"type":"boolean", "default":false, "description":"Layout analysis for text: blocks and columns in reading order, wrapped lines merged into paragraphs, one paragraph per line. Ignored when table is true."}
             }, "required":["image_path"], "additionalProperties":false},
             "outputSchema":{"type":"object", "properties":{
                 "text":{"type":"string"}, "operation":{"const":"ocr"}, "provider":{"const":"local"}, "table":{"type":"boolean"}
@@ -334,10 +337,10 @@ fn tool_definitions() -> Value {
                 "text":{"type":"string", "minLength":1, "maxLength":MAX_TEXT_BYTES, "description":"Text to send to the translation service; maximum 1 MiB UTF-8 bytes."},
                 "source_lang":{"type":"string", "enum":source_codes},
                 "target_lang":{"type":"string", "enum":target_codes},
-                "provider":{"type":"string", "enum":PROVIDERS}
+                "provider":{"type":"string", "pattern":PROVIDER_PATTERN, "description":"bing, baidu, tencent, or model:<id> for a model interface configured in SightOCR settings"}
             }, "required":["text"], "additionalProperties":false},
             "outputSchema":{"type":"object", "properties":{
-                "text":{"type":"string"}, "operation":{"const":"translate"}, "provider":{"type":"string", "enum":PROVIDERS}, "source_lang":{"type":"string"}, "target_lang":{"type":"string"}
+                "text":{"type":"string"}, "operation":{"const":"translate"}, "provider":{"type":"string", "pattern":PROVIDER_PATTERN}, "source_lang":{"type":"string"}, "target_lang":{"type":"string"}
             }, "required":["text","operation","provider","source_lang","target_lang"], "additionalProperties":false},
             "annotations":{"readOnlyHint":true, "destructiveHint":false, "idempotentHint":false, "openWorldHint":true}
         },

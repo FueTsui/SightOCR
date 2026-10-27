@@ -1,362 +1,332 @@
-param([string]$IsccPath = $env:SIGHTOCR_ISCC, [switch]$ShutdownOnly, [switch]$VerifyUpdateTimeout)
+﻿#Requires -Version 7
+# Isolated end-to-end test of SightOCR's own installer.
+#
+# Uses a debug build of SightOCR-Setup, whose SIGHTOCR_SETUP_TEST_ROOT mode
+# redirects every location (registry, shortcuts, Program Files, AppData) into a
+# throwaway folder under target/. No administrator rights are needed and a real
+# SightOCR installation is never touched. A synthetic program stands in for
+# SightOCR so closing and relaunching can be observed.
+#
+# -Updater names a SightOCR 2.0.x executable. Its real --apply-update code is
+# used to install the new package, proving in-app updates from that version.
+# -Package names a real package folder; it is installed (still isolated) and
+# its MCP server must recognise tests/fixtures/basic.png with the real model.
+param(
+    [string]$Updater = (Join-Path $env:ProgramFiles 'SightOCR\SightOCR.exe'),
+    # A real package folder (with OneOCR resources) for the installed-OCR check.
+    [string]$Package = (Join-Path (Split-Path -Parent $PSScriptRoot) 'dist\SightOCR')
+)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-if (-not $IsccPath) { $IsccPath = Join-Path $projectRoot 'target/tools/innosetup-6.7.3/ISCC.exe' }
-if (-not (Test-Path -LiteralPath $IsccPath -PathType Leaf)) { throw 'Prepare Inno Setup or pass -IsccPath.' }
-$packageRoot = Join-Path $projectRoot 'dist/SightOCR'
-$testRoot = Join-Path $projectRoot ('target/installer-smoke-' + [guid]::NewGuid().ToString('N'))
-$installRoot = Join-Path $testRoot 'installed'
-$versionMatch = [regex]::Match((Get-Content -Raw (Join-Path $projectRoot 'Cargo.toml')), '(?m)^version\s*=\s*"([^"]+)"')
-if (-not $versionMatch.Success) { throw 'Package version is missing.' }
-$version = $versionMatch.Groups[1].Value
-New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
-function Assert-TestPath([string]$Candidate) {
-    $prefix = [IO.Path]::GetFullPath($testRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
-    if (-not [IO.Path]::GetFullPath($Candidate).StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing operation outside isolated test directory: $Candidate"
-    }
+Set-Location -LiteralPath $projectRoot
+$version = [regex]::Match((Get-Content -Raw Cargo.toml), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+
+& cargo build --bin SightOCR-Setup
+if ($LASTEXITCODE -ne 0) { throw 'Building SightOCR-Setup failed.' }
+$stub = Join-Path $projectRoot 'target\debug\SightOCR-Setup.exe'
+
+$work = Join-Path $projectRoot ('target\setup-test-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$root = Join-Path $work 'root'
+New-Item -ItemType Directory -Path $work | Out-Null
+$env:SIGHTOCR_SETUP_TEST_ROOT = $root
+$regBase = 'HKCU:\Software\SightOCR.SetupTest'
+$keyName = '{B5261760-0D41-4798-9917-D5AA8C2510C8}}_is1'
+$mainKey = "$regBase\MachineUninstall\$keyName"
+$runKey = "$regBase\Run"
+$programDir = Join-Path $root 'program-files\SightOCR'
+$passed = 0
+
+function Assert([bool]$Condition, [string]$Message) {
+    if (-not $Condition) { throw "FAILED: $Message" }
+    Write-Host "  ok  $Message"
+    $script:passed++
 }
-function Run-Hidden([string]$File, [string[]]$Arguments) {
-    Assert-TestPath $File
-    $process = Start-Process -FilePath $File -ArgumentList $Arguments -WindowStyle Hidden -PassThru
-    if (-not $process.WaitForExit(150000)) { throw 'Isolated installer process exceeded 150 seconds; inspect its log.' }
-    if ($process.ExitCode -ne 0) { throw "Isolated installer process failed ($($process.ExitCode))." }
+
+function Invoke-Program([string]$File, [string[]]$Arguments, [int]$TimeoutSeconds = 180) {
+    $info = [Diagnostics.ProcessStartInfo]::new($File)
+    foreach ($argument in $Arguments) { $info.ArgumentList.Add($argument) }
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $process = [Diagnostics.Process]::Start($info)
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        $process.Kill($true)
+        throw "$File did not finish within $TimeoutSeconds s."
+    }
+    return $process.ExitCode
 }
-function Test-InstallerShutdown {
-    $fixtureRoot = Join-Path $testRoot 'shutdown'
-    $fixturePackage = Join-Path $fixtureRoot 'package'
-    $fixtureInstall = Join-Path $fixtureRoot 'installed'
-    $otherInstall = Join-Path $fixtureRoot 'other-installation'
-    foreach ($directory in @($fixturePackage, $fixtureInstall, $otherInstall, (Join-Path $fixturePackage 'docs'), (Join-Path $fixturePackage 'skills/sightocr'), (Join-Path $fixturePackage 'resources/oneocr'))) {
-        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+
+function Stop-TestPrograms {
+    Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+}
+
+function Reset-State {
+    Stop-TestPrograms
+    if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    if (Test-Path -LiteralPath $regBase) { Remove-Item -LiteralPath $regBase -Recurse -Force }
+    New-Item -ItemType Directory -Path $root | Out-Null
+}
+
+function Get-Value([string]$Key, [string]$Name) {
+    $item = Get-ItemProperty -LiteralPath $Key -Name $Name -ErrorAction SilentlyContinue
+    if ($item) { return $item.$Name }
+    return $null
+}
+
+function New-Shortcut([string]$Path, [string]$Target) {
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($Path)
+    $shortcut.TargetPath = $Target
+    $shortcut.Save()
+}
+
+function Get-ShortcutTarget([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    return (New-Object -ComObject WScript.Shell).CreateShortcut($Path).TargetPath
+}
+
+function Get-Started([string]$Dir) {
+    $log = Join-Path $Dir 'events.log'
+    if (-not (Test-Path -LiteralPath $log)) { return 0 }
+    return @(Get-Content -LiteralPath $log | Where-Object { $_ -like 'started:*' }).Count
+}
+
+function Wait-Until([scriptblock]$Condition, [int]$Seconds = 15) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        if (& $Condition) { return $true }
+        Start-Sleep -Milliseconds 250
     }
-    $fixtureExe = Join-Path $fixturePackage 'SightOCR.exe'
-    $csc = Join-Path $env:windir 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
-    & $csc /nologo /target:winexe /reference:System.Windows.Forms.dll "/out:$fixtureExe" (Join-Path $PSScriptRoot 'installer/ShutdownFixture.cs')
-    if ($LASTEXITCODE -ne 0) { throw 'Synthetic shutdown fixture compilation failed.' }
-    Copy-Item -LiteralPath $fixtureExe -Destination (Join-Path $fixturePackage 'sightocr-mcp.exe')
-    if (-not ('ShutdownFixture' -as [type])) { [Reflection.Assembly]::LoadFrom($fixtureExe) | Out-Null }
-    foreach ($relative in @('README.md', 'LICENSE', 'skills/sightocr/SKILL.md', 'docs/test.md', 'resources/oneocr/oneocr.dll', 'resources/oneocr/onnxruntime.dll', 'resources/oneocr/oneocr.onemodel')) {
-        [IO.File]::WriteAllText((Join-Path $fixturePackage $relative), 'Synthetic installer fixture')
+    return [bool](& $Condition)
+}
+
+try {
+    # Synthetic SightOCR: a hidden window that answers SightOCR's exit message
+    # and records start/exit events next to itself.
+    $fixture = Join-Path $work 'fixture\SightOCR.exe'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $fixture) | Out-Null
+    $csc = Join-Path $env:windir 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    & $csc /nologo /target:winexe /reference:System.Windows.Forms.dll "/out:$fixture" (Join-Path $PSScriptRoot 'installer\ShutdownFixture.cs')
+    if ($LASTEXITCODE -ne 0) { throw 'Compiling the synthetic program failed.' }
+
+    $fakePackage = Join-Path $work 'package'
+    foreach ($dir in 'resources\oneocr', 'docs', 'skills\sightocr') {
+        New-Item -ItemType Directory -Path (Join-Path $fakePackage $dir) -Force | Out-Null
     }
-    & $IsccPath "/DMyAppVersion=$version" '/DSmokeTest=1' "/DSmokeInstallDir=$fixtureInstall" "/DPackageDir=$fixturePackage" "/O$fixtureRoot" '/FShutdown-Smoke' (Join-Path $projectRoot 'SightOCR.iss')
-    if ($LASTEXITCODE -ne 0) { throw 'Shutdown fixture installer compilation failed.' }
-    $fixtureInstaller = Join-Path $fixtureRoot 'Shutdown-Smoke.exe'
-    $silentArguments = @('/SP-', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', '/TASKS=', '/LANG=chinesesimplified', ('/DIR="' + $fixtureInstall + '"'))
-    Run-Hidden $fixtureInstaller $silentArguments
-    # Real Inno uninstall with isolated registration; preserve user files.
-    $previousKey = 'HKCU:\Software\SightOCR.InstallerSmoke\Uninstall\{B5261760-0D41-4798-9917-D5AA8C2510C8}}_is1'
-    if (Test-Path -LiteralPath $previousKey) { throw 'Unexpected previous-version fixture key.' }
-    $previousDir = Join-Path $fixtureRoot 'previous-installation'
-    $previousArgs = @($silentArguments | Where-Object { $_ -notlike '/DIR=*' }) + ('/DIR="' + $previousDir + '"')
-    Run-Hidden $fixtureInstaller $previousArgs
-    [IO.File]::WriteAllText((Join-Path $previousDir 'config.json'), '{"preserve_legacy":true}')
-    [IO.File]::WriteAllText((Join-Path $previousDir 'user-note.txt'), 'preserve me')
-    New-Item -Path $previousKey -Force | Out-Null
+    Copy-Item $fixture (Join-Path $fakePackage 'SightOCR.exe')
+    Copy-Item $fixture (Join-Path $fakePackage 'sightocr-mcp.exe')
+    Set-Content (Join-Path $fakePackage 'README.md') "new readme $version" -Encoding utf8
+    Set-Content (Join-Path $fakePackage 'LICENSE') 'MIT' -Encoding utf8
+    Set-Content (Join-Path $fakePackage 'docs\USAGE.md') 'usage' -Encoding utf8
+    Set-Content (Join-Path $fakePackage 'docs\MCP.md') 'mcp' -Encoding utf8
+    Set-Content (Join-Path $fakePackage 'skills\sightocr\SKILL.md') 'skill' -Encoding utf8
+    $random = [Random]::new(7)
+    foreach ($name in 'oneocr.dll', 'onnxruntime.dll', 'oneocr.onemodel') {
+        $bytes = [byte[]]::new(300000); $random.NextBytes($bytes)
+        [IO.File]::WriteAllBytes((Join-Path $fakePackage "resources\oneocr\$name"), $bytes)
+    }
+    $setup = Join-Path $work "SightOCR-Setup-$version.exe"
+    & $stub --pack $fakePackage $setup
+    if ($LASTEXITCODE -ne 0) { throw 'Packing failed.' }
+    $packageFiles = Get-ChildItem -LiteralPath $fakePackage -Recurse -File |
+        ForEach-Object { $_.FullName.Substring($fakePackage.Length + 1) }
+
+    Write-Host "`n[1] Fresh silent install"
+    Reset-State
+    $code = Invoke-Program $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', "/LOG=$work\1.log")
+    Assert ($code -eq 0) "exit code 0 (got $code)"
+    $same = $true
+    foreach ($file in $packageFiles) {
+        $installed = Join-Path $programDir $file
+        if (-not (Test-Path -LiteralPath $installed) -or
+            (Get-FileHash -LiteralPath $installed).Hash -ne (Get-FileHash -LiteralPath (Join-Path $fakePackage $file)).Hash) { $same = $false }
+    }
+    Assert $same 'every packaged file installed byte for byte'
+    Assert (Test-Path (Join-Path $programDir 'unins000.exe')) 'uninstaller written'
+    Assert ((Get-Value $mainKey 'DisplayVersion') -eq $version) "registered version $version"
+    Assert ((Get-Value $mainKey 'InstallLocation') -eq "$programDir\") 'registered install location'
+    Assert ((Get-Value $mainKey 'UninstallString') -eq "`"$programDir\unins000.exe`"") 'registered uninstaller'
+    Assert ((Get-ShortcutTarget (Join-Path $root 'StartMenu\SightOCR.lnk')) -eq "$programDir\SightOCR.exe") 'Start menu shortcut (default task)'
+    Assert (-not (Test-Path (Join-Path $root 'Desktop\SightOCR.lnk'))) 'no desktop shortcut by default'
+    Assert ($null -eq (Get-Value $runKey 'SightOCR')) 'no startup entry by default'
+    Assert ((Get-Started $programDir) -eq 0) 'silent install does not start SightOCR'
+    Assert (-not (Get-ChildItem -LiteralPath $programDir -Directory -Filter '.setup-*')) 'no staging folder left'
+
+    Write-Host "`n[2] Update an Inno Setup 2.0.3 installation with the real 2.0.3 updater"
+    if (-not (Test-Path -LiteralPath $Updater)) { throw "Updater not found: $Updater" }
+    $updaterVersion = (Get-Item -LiteralPath $Updater).VersionInfo.FileVersion
+    Write-Host "  using $Updater ($updaterVersion)"
+    Reset-State
+    foreach ($file in $packageFiles) {
+        $target = Join-Path $programDir $file
+        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $fakePackage $file) -Destination $target
+    }
+    Set-Content (Join-Path $programDir 'README.md') 'old readme 2.0.3' -Encoding utf8
+    foreach ($old in 'docs\RUST_REFACTOR.md', 'docs\VALIDATION.md', 'docs\UI_DESIGN.md', 'unins001.exe', 'unins001.dat', 'unins001.msg') {
+        Set-Content (Join-Path $programDir $old) 'inno' -Encoding utf8
+    }
+    Set-Content (Join-Path $programDir 'run-as-admin') '1' -NoNewline
+    Set-Content (Join-Path $programDir 'config.json') '{"kept":true}' -Encoding utf8
+    New-Item -Path $mainKey -Force | Out-Null
+    New-ItemProperty -Path $mainKey -Name 'DisplayName' -Value 'SightOCR 版本 2.0.3' | Out-Null
+    New-ItemProperty -Path $mainKey -Name 'DisplayVersion' -Value '2.0.3' | Out-Null
+    New-ItemProperty -Path $mainKey -Name 'InstallLocation' -Value "$programDir\" | Out-Null
+    New-ItemProperty -Path $mainKey -Name 'UninstallString' -Value "`"$programDir\unins001.exe`"" | Out-Null
+    New-ItemProperty -Path $mainKey -Name 'Inno Setup: App Path' -Value $programDir | Out-Null
+    New-Item -Path $runKey -Force | Out-Null
+    New-ItemProperty -Path $runKey -Name 'SightOCR' -Value "`"$programDir\SightOCR.exe`" --silent" | Out-Null
+    New-Shortcut (Join-Path $root 'StartMenu\SightOCR.lnk') "$programDir\SightOCR.exe"
+    $app = Start-Process -FilePath (Join-Path $programDir 'SightOCR.exe') -PassThru
+    Assert (Wait-Until { (Get-Started $programDir) -eq 1 }) 'old SightOCR running'
+    $stage = Join-Path $work 'SightOCR-update-test'
+    New-Item -ItemType Directory -Path $stage | Out-Null
+    Copy-Item -LiteralPath $Updater -Destination (Join-Path $stage 'SightOCR-Updater.exe')
+    $staged = Join-Path $stage "SightOCR-Setup-$version.exe"
+    Copy-Item -LiteralPath $setup -Destination $staged
+    $manifest = [ordered]@{
+        version = $version
+        install_dir = $programDir
+        size = (Get-Item -LiteralPath $staged).Length
+        sha256 = (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash.ToLowerInvariant()
+        parent_pid = $app.Id
+    } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText((Join-Path $stage 'update.json'), $manifest, [Text.UTF8Encoding]::new($false))
+    $info = [Diagnostics.ProcessStartInfo]::new((Join-Path $stage 'SightOCR-Updater.exe'))
+    $info.ArgumentList.Add('--apply-update'); $info.ArgumentList.Add((Join-Path $stage 'update.json'))
+    $info.UseShellExecute = $false
+    $helper = [Diagnostics.Process]::Start($info)
+    # SightOCR exits after handing over; the updater waits for exactly that.
+    Start-Sleep -Seconds 2
+    Assert (-not $helper.HasExited) 'updater waits while SightOCR is still running'
+    Stop-Process -Id $app.Id -Force
+    if (-not $helper.WaitForExit(180000)) { $helper.Kill($true); throw 'The 2.0.3 updater did not finish (an error dialog may be open).' }
+    Assert ($helper.ExitCode -eq 0) "2.0.3 updater reports success (exit $($helper.ExitCode))"
+    Assert ((Get-Content (Join-Path $programDir 'README.md') -Raw).Trim() -eq "new readme $version") 'program files replaced'
+    Assert (-not (Test-Path (Join-Path $programDir 'docs\RUST_REFACTOR.md'))) 'obsolete documents removed'
+    Assert (-not (Get-ChildItem -LiteralPath $programDir -Filter 'unins001.*')) 'Inno Setup uninstaller files removed'
+    Assert ($null -ne (Get-Item (Join-Path $programDir 'unins000.exe'))) 'new uninstaller in place'
+    Assert ((Get-Content (Join-Path $programDir 'config.json') -Raw).Contains('kept')) 'user file in the folder kept'
+    Assert (Test-Path (Join-Path $programDir 'run-as-admin')) 'administrator choice kept'
+    Assert ((Get-Value $runKey 'SightOCR') -eq "`"$programDir\SightOCR.exe`" --silent") 'startup entry kept'
+    Assert ((Get-ShortcutTarget (Join-Path $root 'StartMenu\SightOCR.lnk')) -eq "$programDir\SightOCR.exe") 'existing shortcut kept'
+    Assert ((Get-Value $mainKey 'DisplayName') -eq 'SightOCR') 'registration renamed'
+    Assert ((Get-Value $mainKey 'DisplayVersion') -eq $version) "registration now $version"
+    Assert ($null -eq (Get-Value $mainKey 'Inno Setup: App Path')) 'Inno Setup values cleared'
+    Assert (Wait-Until { (Get-Started $programDir) -ge 2 }) 'SightOCR started again after the update'
+    Assert (Test-Path (Join-Path $stage 'installer.log')) 'log written where the updater asked'
+    Stop-TestPrograms
+
+    Write-Host "`n[3] In-app update refuses while the MCP server runs"
+    $readme = (Get-FileHash (Join-Path $programDir 'README.md')).Hash
+    $mcp = Start-Process -FilePath (Join-Path $programDir 'sightocr-mcp.exe') -PassThru
+    Start-Sleep -Milliseconds 800
+    $code = Invoke-Program $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/UPDATE', "/DIR=$programDir", "/LOG=$work\3.log")
+    Stop-Process -Id $mcp.Id -Force -ErrorAction SilentlyContinue
+    Assert ($code -eq 7) "exit code 7 (got $code)"
+    Assert ((Get-Content "$work\3.log" -Raw) -match 'MCP') 'reason logged'
+    Assert ((Get-FileHash (Join-Path $programDir 'README.md')).Hash -eq $readme) 'nothing replaced'
+    Stop-TestPrograms
+
+    Write-Host "`n[4] A failure while replacing files restores the previous version"
+    $exe = Join-Path $programDir 'SightOCR.exe'
+    [IO.File]::AppendAllText($exe, 'previous-build')
+    $before = (Get-FileHash $exe).Hash
+    $uninstallerBefore = (Get-FileHash (Join-Path $programDir 'unins000.exe')).Hash
+    $lock = [IO.File]::Open((Join-Path $programDir 'docs\USAGE.md'), 'Open', 'Read', 'Read')
     try {
-        New-ItemProperty $previousKey DisplayName -Value 'SightOCR 版本 2.0.1 (当前用户, 64 位)' -Force | Out-Null
-        New-ItemProperty $previousKey InstallLocation -Value $previousDir -Force | Out-Null
-        New-ItemProperty $previousKey UninstallString -Value ('"' + (Join-Path $previousDir 'missing.exe') + '"') -Force | Out-Null
-        $before = (Get-FileHash (Join-Path $fixtureInstall 'SightOCR.exe')).Hash
-        $invalid = Start-Process -FilePath $fixtureInstaller -ArgumentList $silentArguments -WindowStyle Hidden -PassThru
-        if (-not $invalid.WaitForExit(30000) -or $invalid.ExitCode -eq 0) { throw 'Invalid old uninstaller must stop installation.' }
-        if ((Get-FileHash (Join-Path $fixtureInstall 'SightOCR.exe')).Hash -ne $before) { throw 'Invalid migration changed the target.' }
-        Set-ItemProperty $previousKey UninstallString -Value ('"' + (Join-Path $previousDir 'unins000.exe') + '"')
-        Run-Hidden $fixtureInstaller $silentArguments
-        if (Test-Path (Join-Path $previousDir 'SightOCR.exe')) { throw 'Previous installation was not uninstalled.' }
-        if ([IO.File]::ReadAllText((Join-Path $previousDir 'config.json')) -ne '{"preserve_legacy":true}') { throw 'Legacy config not preserved.' }
-        if (-not (Test-Path (Join-Path $previousDir 'user-note.txt'))) { throw 'User file removed by migration.' }
-        if (-not (Get-ChildItem (Join-Path $fixtureInstall 'upgrade-backup') -Recurse -Filter config.json)) { throw 'Legacy config backup missing.' }
-    } finally {
-        if (Test-Path -LiteralPath $previousKey) { Remove-Item -LiteralPath $previousKey -Recurse }
-    }
-    Copy-Item -LiteralPath $fixtureExe -Destination (Join-Path $otherInstall 'SightOCR.exe')
-    function Start-Fixture([string]$Directory, [string]$Executable = 'SightOCR.exe') {
-        $file = Join-Path $Directory $Executable
-        Assert-TestPath $file
-        $process = Start-Process -FilePath $file -WindowStyle Hidden -PassThru
-        $timer = [Diagnostics.Stopwatch]::StartNew()
-        while ($timer.ElapsedMilliseconds -lt 10000) {
-            $events = Join-Path $Directory 'events.log'
-            if ((Test-Path -LiteralPath $events) -and [IO.File]::ReadAllText($events).Contains("started:$($process.Id)`n")) { return $process }
-            if ($process.HasExited) { throw 'Synthetic app exited before creating its window.' }
-            Start-Sleep -Milliseconds 50
-        }
-        throw 'Synthetic app did not create its window.'
-    }
-    function Stop-Fixture([string]$Directory) {
-        Assert-TestPath $Directory
-        foreach ($process in (Get-Process SightOCR,sightocr-mcp -ErrorAction SilentlyContinue | Where-Object { $_.Path -in @((Join-Path $Directory 'SightOCR.exe'), (Join-Path $Directory 'sightocr-mcp.exe')) })) {
-            [ShutdownFixture]::RequestShutdown($process.Id)
-            if (-not $process.WaitForExit(5000)) { $process.Kill(); $process.WaitForExit() }
-        }
-    }
-    function Run-WithDialogResponse([int]$Button) {
-        $arguments = @($silentArguments | Where-Object { $_ -ne '/SUPPRESSMSGBOXES' })
-        $setup = Start-Process -FilePath $fixtureInstaller -ArgumentList $arguments -WindowStyle Hidden -PassThru
-        $timer = [Diagnostics.Stopwatch]::StartNew()
-        $responded = $false
-        while (-not $setup.HasExited -and $timer.ElapsedMilliseconds -lt 20000) {
-            $processIds = @($setup.Id)
-            $processIds += Get-CimInstance Win32_Process -Filter "ParentProcessId=$($setup.Id)" | ForEach-Object { $_.ProcessId }
-            foreach ($processId in $processIds) {
-                if ([ShutdownFixture]::RespondToInstaller($processId, $Button)) { $responded = $true; break }
-            }
-            if ($responded) { break }
-            Start-Sleep -Milliseconds 100
-        }
-        if (-not $responded) { throw 'Isolated installer did not show its automatic-close confirmation.' }
-        if (-not $setup.WaitForExit(30000)) { throw 'Isolated installer did not exit after the synthetic response.' }
-        return $setup.ExitCode
-    }
-    $other = $null
-    try {
-        $other = Start-Fixture $otherInstall
-        $running = Start-Fixture $fixtureInstall
-        # A suppressed ordinary install must decline shutdown; it has no approval.
-        $cancelled = Start-Process -FilePath $fixtureInstaller -ArgumentList $silentArguments -WindowStyle Hidden -PassThru
-        if (-not $cancelled.WaitForExit(30000) -or $cancelled.ExitCode -eq 0 -or $running.HasExited) { throw 'Unapproved silent install did not preserve the running app.' }
-        if ((Run-WithDialogResponse 2) -eq 0 -or $running.HasExited) { throw 'Cancel did not preserve the running app and exit installation.' }
-        if ((Run-WithDialogResponse 1) -ne 0 -or -not $running.WaitForExit(5000)) { throw 'Confirmed installation did not close the running app.' }
-        $eventsFile = Join-Path $fixtureInstall 'events.log'
-        if (-not [IO.File]::ReadAllText($eventsFile).Contains("graceful:$($running.Id)`n")) { throw 'Confirmed installation did not use graceful exit.' }
-        $console = Start-Fixture $fixtureInstall 'sightocr-mcp.exe'
-        $consoleCancelled = Start-Process -FilePath $fixtureInstaller -ArgumentList $silentArguments -WindowStyle Hidden -PassThru
-        if (-not $consoleCancelled.WaitForExit(30000) -or $consoleCancelled.ExitCode -eq 0 -or $console.HasExited) { throw 'Unapproved silent install did not preserve the running CLI/MCP process.' }
-        if ((Run-WithDialogResponse 1) -ne 0 -or -not $console.WaitForExit(5000)) { throw 'Confirmed installation did not close the CLI/MCP process.' }
-        # The compatibility path applies only to a fixture without the new marker.
-        $legacyFlag = Join-Path $fixtureInstall 'legacy'
-        [IO.File]::WriteAllText($legacyFlag, '')
-        $legacy = Start-Fixture $fixtureInstall
-        if ((Run-WithDialogResponse 1) -ne 0 -or -not $legacy.WaitForExit(5000)) { throw 'Confirmed installation did not close the legacy app.' }
-        Assert-TestPath $legacyFlag
-        Remove-Item -LiteralPath $legacyFlag
-        $running = Start-Fixture $fixtureInstall
-        $startsBeforeUpdate = @([IO.File]::ReadAllLines($eventsFile) | Where-Object { $_.StartsWith('started:') }).Count
-        $adminSetting = Join-Path $fixtureInstall 'run-as-admin'
-        [IO.File]::WriteAllText($adminSetting, '1')
-        $migrationStartup = 'HKCU:\Software\SightOCR.InstallerSmoke\Run'
-        New-Item -Path $migrationStartup -Force | Out-Null
-        $migrationCommand = '"' + (Join-Path $fixtureInstall 'SightOCR.exe') + '" --silent'
-        New-ItemProperty $migrationStartup SightOCR -Value $migrationCommand -Force | Out-Null
-        New-Item -Path $previousKey -Force | Out-Null
+        $code = Invoke-Program $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', "/LOG=$work\4.log")
+    } finally { $lock.Close() }
+    Assert ($code -eq 3) "exit code 3 (got $code)"
+    Assert ((Get-FileHash $exe).Hash -eq $before) 'program restored byte for byte'
+    Assert ((Get-FileHash (Join-Path $programDir 'unins000.exe')).Hash -eq $uninstallerBefore) 'uninstaller restored'
+    Assert (-not (Get-ChildItem -LiteralPath $programDir -Directory -Filter '.setup-*')) 'staging folder removed'
+
+    Write-Host "`n[5] Update moves an early default folder to Program Files"
+    Reset-State
+    $legacy = Join-Path $root 'legacy-user\SightOCR'
+    $code = Invoke-Program $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', "/DIR=$legacy", '/TASKS=startmenu,autostart,runasadmin')
+    Assert ($code -eq 0) 'installed in the early default folder'
+    Assert ((Get-Value $runKey 'SightOCR') -eq "`"$legacy\SightOCR.exe`" --silent") '/TASKS applied (startup)'
+    Assert (Test-Path (Join-Path $legacy 'run-as-admin')) '/TASKS applied (administrator)'
+    Set-Content (Join-Path $legacy 'config.json') '{"legacy":true}' -Encoding utf8
+    $code = Invoke-Program $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/UPDATE', "/DIR=$legacy", '/NOLAUNCH', "/LOG=$work\5.log")
+    Assert ($code -eq 0) "exit code 0 (got $code)"
+    Assert (Test-Path (Join-Path $programDir 'SightOCR.exe')) 'installed in Program Files'
+    Assert (-not (Test-Path (Join-Path $legacy 'SightOCR.exe'))) 'old folder uninstalled'
+    Assert (@(Get-ChildItem (Join-Path $root 'AppData\Local\SightOCR\UpgradeBackup') -Recurse -Filter config.json).Count -eq 1) 'old configuration backed up'
+    Assert (Test-Path (Join-Path $programDir 'run-as-admin')) 'administrator choice carried over'
+    Assert ((Get-Value $runKey 'SightOCR') -eq "`"$programDir\SightOCR.exe`" --silent") 'startup entry moved'
+    Assert ((Get-ShortcutTarget (Join-Path $root 'StartMenu\SightOCR.lnk')) -eq "$programDir\SightOCR.exe") 'shortcut moved'
+    Assert ((Get-Value $mainKey 'InstallLocation') -eq "$programDir\") 'registration moved'
+    Assert (@(Get-ChildItem "$regBase\MachineUninstall").Count -eq 1) 'single registration'
+    Assert ((Get-Started $programDir) -eq 0) '/NOLAUNCH respected'
+
+    Write-Host "`n[6] Silent uninstall"
+    $settings = Join-Path $root 'AppData\Roaming\SightOCR'
+    New-Item -ItemType Directory -Path $settings -Force | Out-Null
+    Set-Content (Join-Path $settings 'config.json') '{}' -Encoding utf8
+    $code = Invoke-Program (Join-Path $programDir 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$work\6.log")
+    Assert ($code -eq 0) "exit code 0 (got $code)"
+    Assert (-not (Test-Path (Join-Path $programDir 'SightOCR.exe'))) 'program removed'
+    Assert (-not (Test-Path $mainKey)) 'registration removed'
+    Assert (-not (Test-Path (Join-Path $root 'StartMenu\SightOCR.lnk'))) 'shortcut removed'
+    Assert ($null -eq (Get-Value $runKey 'SightOCR')) 'startup entry removed'
+    Assert (Test-Path (Join-Path $settings 'config.json')) 'settings kept by default'
+    Assert (Wait-Until { -not (Test-Path -LiteralPath $programDir) } 20) 'uninstaller and empty folder removed'
+
+    Write-Host "`n[7] A damaged package is refused"
+    Reset-State
+    $damaged = Join-Path $work 'damaged.exe'
+    $bytes = [IO.File]::ReadAllBytes($setup)
+    $bytes[$bytes.Length - 5000] = $bytes[$bytes.Length - 5000] -bxor 0xff
+    [IO.File]::WriteAllBytes($damaged, $bytes)
+    $code = Invoke-Program $damaged @('/VERYSILENT', '/SUPPRESSMSGBOXES', "/LOG=$work\7.log")
+    Assert ($code -eq 1) "exit code 1 (got $code)"
+    Assert (-not (Test-Path (Join-Path $programDir 'SightOCR.exe'))) 'nothing installed'
+
+
+    Write-Host "`n[8] Real package: installed program recognises text with the packaged model"
+    if (-not (Test-Path -LiteralPath (Join-Path $Package 'resources\oneocr\oneocr.onemodel'))) {
+        Write-Host "  skipped (no package with OneOCR resources at $Package)"
+    } else {
+        Reset-State
+        $realSetup = Join-Path $work "real\SightOCR-Setup-$version.exe"
+        New-Item -ItemType Directory -Path (Split-Path -Parent $realSetup) | Out-Null
+        & $stub --pack $Package $realSetup
+        if ($LASTEXITCODE -ne 0) { throw 'Packing the real package failed.' }
+        $code = Invoke-Program $realSetup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/TASKS=', "/LOG=$work\8.log") 600
+        Assert ($code -eq 0) "exit code 0 (got $code)"
+        $info = [Diagnostics.ProcessStartInfo]::new((Join-Path $programDir 'sightocr-mcp.exe'))
+        $info.UseShellExecute = $false
+        $info.RedirectStandardInput = $true
+        $info.RedirectStandardOutput = $true
+        $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+        $info.CreateNoWindow = $true
+        $probe = [Diagnostics.Process]::Start($info)
         try {
-            New-ItemProperty $previousKey DisplayName -Value 'SightOCR' -Force | Out-Null
-            New-ItemProperty $previousKey InstallLocation -Value $fixtureInstall -Force | Out-Null
-            New-ItemProperty $previousKey UninstallString -Value ('"' + (Join-Path $fixtureInstall 'unins000.exe') + '"') -Force | Out-Null
-            Run-Hidden $fixtureInstaller ($silentArguments + '/UPDATE' + ('/LOG="' + (Join-Path $fixtureRoot 'update.log') + '"'))
-        } finally { if (Test-Path -LiteralPath $previousKey) { Remove-Item -LiteralPath $previousKey -Recurse } }
-        if ([IO.File]::ReadAllText($adminSetting) -ne '1') { throw 'Update did not preserve administrator startup setting.' }
-        if ((Get-ItemPropertyValue $migrationStartup SightOCR) -ne $migrationCommand) { throw 'Uninstall-before-update lost startup.' }
-        Remove-Item -LiteralPath $migrationStartup -Recurse
-        if (-not $running.WaitForExit(5000) -or -not [IO.File]::ReadAllText($eventsFile).Contains("graceful:$($running.Id)`n")) { throw 'Update did not request and wait for graceful exit.' }
-        $timer = [Diagnostics.Stopwatch]::StartNew()
-        do {
-            Start-Sleep -Milliseconds 50
-            $startsAfterUpdate = @([IO.File]::ReadAllLines($eventsFile) | Where-Object { $_.StartsWith('started:') }).Count
-        } while ($startsAfterUpdate -le $startsBeforeUpdate -and $timer.ElapsedMilliseconds -lt 10000)
-        if ($startsAfterUpdate -ne $startsBeforeUpdate + 1) { throw 'Update did not restart the installed app exactly once.' }
-        if ($other.HasExited) { throw 'Installer closed the unrelated installation.' }
-        $timeoutResult = 'Not requested; pass -VerifyUpdateTimeout for the 120-second failure case.'
-        if ($VerifyUpdateTimeout) {
-            Stop-Fixture $fixtureInstall
-            [IO.File]::WriteAllText($legacyFlag, '')
-            $blocked = Start-Fixture $fixtureInstall
-            $protectedFile = Join-Path $fixtureInstall 'README.md'
-            [IO.File]::WriteAllText($protectedFile, 'Update must not overwrite this while the app cannot exit.')
-            $protectedHash = (Get-FileHash -LiteralPath $protectedFile -Algorithm SHA256).Hash
-            $failureArguments = $silentArguments + '/UPDATE' + ('/LOG="' + (Join-Path $fixtureRoot 'update-timeout.log') + '"')
-            $blockedSetup = Start-Process -FilePath $fixtureInstaller -ArgumentList $failureArguments -WindowStyle Hidden -PassThru
-            if (-not $blockedSetup.WaitForExit(150000) -or $blockedSetup.ExitCode -eq 0) { throw 'Update did not fail when the app could not exit.' }
-            if ($blocked.HasExited -or (Get-FileHash -LiteralPath $protectedFile -Algorithm SHA256).Hash -ne $protectedHash) { throw 'Timed-out update terminated the app or replaced files.' }
-            $timeoutResult = 'Passed: installer failed without terminating the app or replacing files.'
-        }
-        # Reproduce the reported HKCU/HKLM conflict in isolated registry roots,
-        # in both enumeration orders, using the old updater's explicit /DIR.
-        $machineKey = 'HKCU:\Software\SightOCR.InstallerSmoke\MachineUninstall\{B5261760-0D41-4798-9917-D5AA8C2510C8}}_is1'
-        if (Test-Path -LiteralPath $machineKey) { throw 'Unexpected machine fixture registration.' }
-        $legacyUser = Join-Path $fixtureInstall 'legacy-user'
-        $newDefault = Join-Path $fixtureInstall 'program-files'
-        $legacyArguments = @($silentArguments | Where-Object { $_ -notlike '/DIR=*' }) + ('/DIR="' + $legacyUser + '"')
-        $migrationStartup = 'HKCU:\Software\SightOCR.InstallerSmoke\Run'
-        foreach ($validUser in @($true, $false)) {
-            Run-Hidden $fixtureInstaller $legacyArguments
-            [IO.File]::WriteAllText((Join-Path $legacyUser 'config.json'), '{"keep_after_migration":true}')
-            [IO.File]::WriteAllText((Join-Path $legacyUser 'run-as-admin'), '1')
-            New-Item -Path $migrationStartup -Force | Out-Null
-            New-ItemProperty $migrationStartup SightOCR -Value ('"' + (Join-Path $legacyUser 'SightOCR.exe') + '" --silent') -Force | Out-Null
-            try {
-                foreach ($registryKey in @($previousKey, $machineKey)) {
-                    New-Item -Path $registryKey -Force | Out-Null
-                    New-ItemProperty $registryKey DisplayName -Value 'SightOCR 版本 2.0.2' -Force | Out-Null
-                    New-ItemProperty $registryKey InstallLocation -Value ($legacyUser + '\') -Force | Out-Null
-                    $isValid = ($registryKey -eq $previousKey) -eq $validUser
-                    $uninstallerName = if ($isValid) { 'unins000.exe' } else { 'unins001.exe' }
-                    New-ItemProperty $registryKey UninstallString -Value ('"' + (Join-Path $legacyUser $uninstallerName) + '"') -Force | Out-Null
-                }
-                Run-Hidden $fixtureInstaller ($legacyArguments + '/UPDATE')
-                if (Test-Path (Join-Path $legacyUser 'SightOCR.exe')) { throw 'Legacy /DIR was not migrated.' }
-                if (-not (Test-Path (Join-Path $newDefault 'SightOCR.exe'))) { throw 'Program Files destination was not used.' }
-                if ((Test-Path $previousKey) -or (Test-Path $machineKey)) { throw 'Duplicate uninstall registration remains.' }
-                if ([IO.File]::ReadAllText((Join-Path $legacyUser 'config.json')) -ne '{"keep_after_migration":true}') { throw 'Migration lost config.' }
-                if ([IO.File]::ReadAllText((Join-Path $newDefault 'run-as-admin')) -ne '1') { throw 'Migration lost administrator setting.' }
-                if ((Get-ItemPropertyValue $migrationStartup SightOCR) -ne ('"' + (Join-Path $newDefault 'SightOCR.exe') + '" --silent')) { throw 'Startup still points at the old directory.' }
-                Stop-Fixture $newDefault
-                Run-Hidden (Join-Path $newDefault 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
-            } finally {
-                Stop-Fixture $newDefault
-                foreach ($registryKey in @($previousKey, $machineKey, $migrationStartup)) {
-                    if (Test-Path -LiteralPath $registryKey) { Remove-Item -LiteralPath $registryKey -Recurse }
-                }
-            }
-        }
-        [pscustomobject]@{ Complete = $true; DuplicateRegistrationBothOrders = $true; LegacyUpdateDirMigrated = $true; MigratedAdminAndStartupPreserved = $true; CustomUpdateDirectoryPreserved = $true; PreviousVersionUninstalled = $true; InvalidRegistrationStopsInstall = $true; LegacyConfigurationBackedUp = $true; UserFilesPreserved = $true; UpdatePreservesAdminAndStartup = $true; CancelPreservesApp = $true; NoUnapprovedSilentShutdown = $true; ConfirmedGracefulExit = $true; ConfirmedLegacyExit = $true; UpdateGracefulExitAndSingleRestart = $true; OtherInstallationPreserved = $true; UpdateTimeout = $timeoutResult } |
-            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $fixtureRoot 'report.json') -Encoding UTF8
-    } finally {
-        Stop-Fixture $fixtureInstall
-        Stop-Fixture $otherInstall
+            $image = Join-Path $projectRoot 'tests\fixtures\basic.png'
+            $requests = @(
+                @{jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{protocolVersion = '2025-11-25'; capabilities = @{}; clientInfo = @{name = 'installer'; version = '1' } } },
+                @{jsonrpc = '2.0'; method = 'notifications/initialized' },
+                @{jsonrpc = '2.0'; id = 2; method = 'tools/call'; params = @{name = 'sightocr_ocr'; arguments = @{image_path = $image; table = $true } } }
+            )
+            foreach ($request in $requests) { $probe.StandardInput.WriteLine(($request | ConvertTo-Json -Compress -Depth 8)) }
+            $probe.StandardInput.Close()
+            $output = $probe.StandardOutput.ReadToEndAsync()
+            if (-not $probe.WaitForExit(60000)) { $probe.Kill(); throw 'Installed MCP OCR timed out.' }
+            $reply = ($output.Result.Trim() -split "`n")[-1] | ConvertFrom-Json
+            $text = [string]$reply.result.structuredContent.text
+        } finally { $probe.Dispose() }
+        Assert (-not $reply.result.isError -and $text.Contains("Alpha`t100") -and $text.Contains("Beta`t200")) 'installed MCP recognises the sample table'
+        $code = Invoke-Program (Join-Path $programDir 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES')
+        Assert ($code -eq 0) 'real package uninstalls'
     }
-    Write-Host "Installer shutdown report: $fixtureRoot/report.json"
-}
-Test-InstallerShutdown
-if ($ShutdownOnly) { return }
-$compileArgs = @(
-    "/DMyAppVersion=$version", '/DSmokeTest=1', "/DSmokeInstallDir=$installRoot",
-    "/DPackageDir=$packageRoot", "/O$testRoot", '/FSightOCR-Smoke',
-    (Join-Path $projectRoot 'SightOCR.iss')
-)
-& $IsccPath @compileArgs
-if ($LASTEXITCODE -ne 0) { throw 'Isolated installer compilation failed.' }
-$installer = Join-Path $testRoot 'SightOCR-Smoke.exe'
-$configSentinel = Join-Path $installRoot 'config.json'
-$configText = '{"synthetic_install_test":true}'
-[IO.File]::WriteAllText($configSentinel, $configText)
-$isolatedConfig = Join-Path $testRoot 'runtime-config.json'
-[IO.File]::WriteAllText($isolatedConfig, '{}')
-$payload = @('SightOCR.exe', 'sightocr-mcp.exe', 'README.md', 'LICENSE', 'skills/sightocr/SKILL.md', 'resources/oneocr/oneocr.dll', 'resources/oneocr/onnxruntime.dll', 'resources/oneocr/oneocr.onemodel')
-$payload += Get-ChildItem -LiteralPath (Join-Path $packageRoot 'docs') -Filter '*.md' | ForEach-Object { 'docs/' + $_.Name }
-$hashes = @{}
-foreach ($relative in $payload) {
-    $hashes[$relative] = (Get-FileHash -LiteralPath (Join-Path $packageRoot $relative) -Algorithm SHA256).Hash
-}
-$smokeRegistryPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SightOCR.InstallerSmoke_is1'
-if (Test-Path -LiteralPath $smokeRegistryPath) { throw 'An unexpected smoke uninstall key already exists; not modifying it.' }
-$startupTestPath = 'HKCU:\Software\SightOCR.InstallerSmoke\Run'
-if (Test-Path $startupTestPath) { throw 'Unexpected startup test registry key; refusing to overwrite.' }
-$installArguments = @('/SP-', '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCLOSEAPPLICATIONS', '/NOICONS', '/TASKS=', '/LANG=chinesesimplified', ('/DIR="' + $installRoot + '"'))
-# Repeat installation to verify in-place replacement also preserves unknown files.
-for ($attempt = 1; $attempt -le 2; $attempt++) {
-    Run-Hidden $installer ($installArguments + ('/LOG="' + (Join-Path $testRoot "install-$attempt.log") + '"'))
-    foreach ($relative in $payload) {
-        $installed = Join-Path $installRoot $relative
-        if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -ne $hashes[$relative]) {
-            throw "Installed payload mismatch: $relative"
-        }
-    }
-    if ([IO.File]::ReadAllText($configSentinel) -ne $configText) { throw 'Installation changed existing configuration.' }
-    if (Test-Path -LiteralPath $smokeRegistryPath) { throw 'Isolated installer created uninstall registration.' }
-    $unexpected = Get-Process SightOCR -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $installRoot 'SightOCR.exe') }
-    if ($unexpected) { throw 'Silent installation unexpectedly started SightOCR.' }
-}
-# Verify checked, unchecked, and uninstall startup semantics in a dedicated test key.
-$withStartup = $installArguments | Where-Object { $_ -ne '/TASKS=' }
-$adminSetting = Join-Path $installRoot 'run-as-admin'
-if (Test-Path -LiteralPath $adminSetting) { throw 'Administrator startup should be opt-in.' }
-Run-Hidden $installer ($withStartup + '/TASKS=runasadmin')
-if ([IO.File]::ReadAllText($adminSetting) -ne '1') { throw 'Checked administrator startup option did not persist.' }
-Run-Hidden $installer $installArguments
-if (Test-Path -LiteralPath $adminSetting) { throw 'Unchecked administrator startup option did not clear.' }
-Run-Hidden $installer ($withStartup + '/TASKS=autostart')
-$expectedStartup = '"' + (Join-Path $installRoot 'SightOCR.exe') + '" --silent'
-if ((Get-ItemPropertyValue $startupTestPath SightOCR) -ne $expectedStartup) { throw 'Incorrect startup command.' }
-Run-Hidden $installer $installArguments
-if (Get-ItemProperty $startupTestPath -Name SightOCR -ErrorAction SilentlyContinue) { throw 'Unchecked startup option did not remove value.' }
-Run-Hidden $installer ($withStartup + '/TASKS=autostart,runasadmin')
-# Exercise the fixed-purpose helper shipped in the real GUI binary. These
-# writable, isolated paths require no UAC and cannot affect the live install.
-$installedGui = Join-Path $installRoot 'SightOCR.exe'
-Run-Hidden $installedGui @('--set-run-as-admin', 'off')
-if (Test-Path -LiteralPath $adminSetting) { throw 'Administrator settings helper did not disable the installer marker.' }
-Run-Hidden $installedGui @('--set-run-as-admin', 'on')
-if ([IO.File]::ReadAllText($adminSetting).Trim() -ne '1') { throw 'Administrator settings helper did not enable the installer marker.' }
-# Exercise the real console host, which has no GUI graceful-exit message.
-# Automatic update must fail promptly without closing it or replacing payload.
-$consoleStart = [Diagnostics.ProcessStartInfo]::new()
-$consoleStart.FileName = Join-Path $installRoot 'sightocr-mcp.exe'
-$consoleStart.Arguments = ''
-$consoleStart.UseShellExecute = $false
-$consoleStart.CreateNoWindow = $true
-$consoleStart.RedirectStandardInput = $true
-$consoleStart.RedirectStandardOutput = $true
-$consoleStart.RedirectStandardError = $true
-$consoleStart.EnvironmentVariables['SIGHTOCR_CONFIG'] = $isolatedConfig
-Assert-TestPath $consoleStart.FileName
-$consoleHost = [Diagnostics.Process]::Start($consoleStart)
-try {
-    $consoleHost.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","clientInfo":{"name":"installer-smoke","version":"1"},"capabilities":{}}}')
-    $consoleHost.StandardInput.Flush()
-    $ready = $consoleHost.StandardOutput.ReadLineAsync()
-    if (-not $ready.Wait(5000) -or -not ($ready.Result | ConvertFrom-Json).result.serverInfo) { throw 'Installed MCP host did not initialize.' }
-    $updateLog = Join-Path $testRoot 'update-active-mcp.log'
-    Assert-TestPath $installer
-    $blockedUpdate = Start-Process -FilePath $installer -ArgumentList ($installArguments + '/UPDATE' + ('/LOG="' + $updateLog + '"')) -WindowStyle Hidden -PassThru
-    if (-not $blockedUpdate.WaitForExit(10000)) { throw 'Update waited instead of promptly reporting the active MCP host.' }
-    if ($blockedUpdate.ExitCode -eq 0 -or $consoleHost.HasExited) { throw 'Update should preserve the active MCP host and fail before replacing files.' }
-    foreach ($relative in $payload) {
-        if ((Get-FileHash -LiteralPath (Join-Path $installRoot $relative) -Algorithm SHA256).Hash -ne $hashes[$relative]) { throw 'Blocked update modified the installed payload.' }
-    }
+
+    Write-Host "`nAll $passed checks passed. Logs: $work"
 } finally {
-    $consoleHost.StandardInput.Close()
-    if (-not $consoleHost.WaitForExit(5000)) { $consoleHost.Kill(); $consoleHost.WaitForExit() }
-    $consoleHost.Dispose()
+    Stop-TestPrograms
+    if (Test-Path -LiteralPath $regBase) { Remove-Item -LiteralPath $regBase -Recurse -Force }
+    Remove-Item Env:\SIGHTOCR_SETUP_TEST_ROOT -ErrorAction SilentlyContinue
 }
-$mcpProbe = [Diagnostics.Process]::Start($consoleStart)
-try {
-    $imagePath = Join-Path $projectRoot 'tests/fixtures/basic.png'
-    $requests = @(
-        @{jsonrpc='2.0'; id=1; method='initialize'; params=@{protocolVersion='2025-11-25'; capabilities=@{}; clientInfo=@{name='installer';version='1'}}},
-        @{jsonrpc='2.0'; method='notifications/initialized'},
-        @{jsonrpc='2.0'; id=2; method='tools/call'; params=@{name='sightocr_ocr'; arguments=@{image_path=$imagePath; table=$true}}}
-    )
-    foreach ($request in $requests) { $mcpProbe.StandardInput.WriteLine(($request | ConvertTo-Json -Compress -Depth 8)) }
-    $mcpProbe.StandardInput.Close()
-    $response = $mcpProbe.StandardOutput.ReadToEndAsync()
-    if (-not $mcpProbe.WaitForExit(30000)) { $mcpProbe.Kill(); throw 'Installed MCP OCR timed out.' }
-    $reply = ($response.Result.Trim() -split "`n")[-1] | ConvertFrom-Json
-    $ocr = $reply.result.structuredContent.text
-    if ($reply.result.isError -or -not $ocr.Contains("Alpha`t100") -or -not $ocr.Contains("Beta`t200")) { throw 'Installed MCP OCR failed.' }
-} finally { $mcpProbe.Dispose() }
-if ((Get-ItemPropertyValue $startupTestPath SightOCR) -ne $expectedStartup) { throw 'Blocked update changed startup.' }
-$uninstaller = Join-Path $installRoot 'unins000.exe'
-Assert-TestPath $uninstaller
-Run-Hidden $uninstaller @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="' + (Join-Path $testRoot 'uninstall.log') + '"'))
-if (Get-ItemProperty $startupTestPath -Name SightOCR -ErrorAction SilentlyContinue) { throw 'Uninstall left startup value.' }
-if (Test-Path -LiteralPath $adminSetting) { throw 'Uninstall left administrator startup setting.' }
-Remove-Item -LiteralPath $startupTestPath -ErrorAction SilentlyContinue
-foreach ($relative in $payload) {
-    if (Test-Path -LiteralPath (Join-Path $installRoot $relative)) { throw "Uninstaller left an installed file: $relative" }
-}
-if ([IO.File]::ReadAllText($configSentinel) -ne $configText) { throw 'Uninstallation removed user-created configuration.' }
-if (Test-Path -LiteralPath $smokeRegistryPath) { throw 'Smoke uninstall registration was left behind.' }
-[pscustomobject]@{
-    StartupCheckedUncheckedAndUninstall = $true
-    AdministratorSettingsHelperRoundtrip = $true
-    AdminCheckedUncheckedUpdateAndUninstall = $true
-    Complete = $true
-    Version = $version
-    TestRoot = $testRoot
-    Compiler = $IsccPath
-    InstallerSHA256 = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash
-    PayloadSHA256 = $hashes
-    InstallAndReinstall = $true
-    Uninstall = $true
-    PreservedConfiguration = $true
-    NoUninstallRegistration = $true
-    NoSilentLaunch = $true
-    InstalledOneOcrTsv = $ocr
-    InstalledMcpOcrJson = $true
-    ActiveMcpUpdateFailsPromptlyWithoutReplacement = $true
-    ShutdownProtocol = 'shutdown/report.json'
-    VariantLimit = 'Same payload and install/uninstall code; test variant excludes shortcuts and uninstall registration.'
-} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $testRoot 'report.json') -Encoding UTF8
-Write-Host "Installer smoke report: $testRoot/report.json"

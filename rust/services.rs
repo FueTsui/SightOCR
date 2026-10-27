@@ -10,6 +10,7 @@ use md5::Md5;
 use reqwest::blocking::{Client, ClientBuilder, RequestBuilder, Response};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::fmt;
 use std::io::Read;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,11 +30,11 @@ const CONTENT_TYPE: &str = "application/json; charset=utf-8";
 
 #[derive(Debug)]
 pub enum ServiceError {
-    Credentials(&'static str),
-    InvalidInput(&'static str),
+    Credentials(Cow<'static, str>),
+    InvalidInput(Cow<'static, str>),
     Network(&'static str),
     Http {
-        provider: &'static str,
+        provider: Cow<'static, str>,
         status: u16,
     },
     Provider {
@@ -49,10 +50,19 @@ impl fmt::Display for ServiceError {
             Self::Credentials(provider) => write!(f, "{provider}凭据未填写完整，请在设置中检查"),
             Self::InvalidInput(message) => f.write_str(message),
             Self::Network(message) => f.write_str(message),
-            Self::Http { provider, status } => write!(
-                f,
-                "{provider}请求失败（HTTP {status}），请检查网络、服务权限或配额"
-            ),
+            Self::Http { provider, status } => {
+                let hint = match status {
+                    400 | 422 => "请检查模型名称、协议类型或请求参数",
+                    401 | 403 => "请检查 API Key 是否正确、是否有该模型权限",
+                    404 => "请检查服务地址（Base URL）、协议类型和模型名称",
+                    408 | 504 => "服务响应超时，请稍后重试",
+                    413 => "截图或文本过大，请缩小范围",
+                    429 => "请求过于频繁或额度不足，请稍后重试或检查配额",
+                    500..=599 => "服务端暂时不可用，请稍后重试",
+                    _ => "请检查网络、服务权限或配额",
+                };
+                write!(f, "{provider}请求失败（HTTP {status}），{hint}")
+            }
             Self::Provider { provider, code } => {
                 write!(f, "{provider}返回错误（{code}），请检查凭据、权限或配额")
             }
@@ -84,7 +94,9 @@ fn build_client(proxy: &ProxyConfig) -> Result<Client> {
         Client::builder()
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(5))
+            // A first connection through a local proxy or TUN tool can need
+            // several seconds (rule matching, node selection, cold DNS).
+            .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .pool_idle_timeout(Duration::from_secs(60))
             .tcp_keepalive(Duration::from_secs(30))
@@ -104,7 +116,7 @@ pub(crate) fn apply_proxy(builder: ClientBuilder, config: &ProxyConfig) -> Resul
         ProxyMode::Manual => {
             let url = config.manual_url()?;
             let mut proxy = reqwest::Proxy::all(url.as_str())
-                .map_err(|_| ServiceError::InvalidInput("无法解析手动代理配置"))?;
+                .map_err(|_| ServiceError::InvalidInput("无法解析手动代理配置".into()))?;
             if !config.username.is_empty() || !config.password.is_empty() {
                 proxy = proxy.basic_auth(&config.username, &config.password);
             }
@@ -121,6 +133,18 @@ pub struct Services {
     system_proxy: Option<system_proxy::Snapshot>,
     baidu_token: Option<Token>,
     bing_session: Option<BingSession>,
+    /// Lazily built for loopback (local model) endpoints only.
+    loopback_client: Option<Client>,
+    /// A network error happened: rebuild connections and sessions before the
+    /// next task instead of reusing them until SightOCR restarts.
+    reconnect: bool,
+}
+
+fn is_network_error(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<ServiceError>(),
+        Some(ServiceError::Network(_))
+    )
 }
 
 impl Services {
@@ -134,6 +158,8 @@ impl Services {
             system_proxy,
             baidu_token: None,
             bing_session: None,
+            loopback_client: None,
+            reconnect: false,
         })
     }
 
@@ -148,7 +174,7 @@ impl Services {
         };
         let system_unchanged = proxy.mode != ProxyMode::System
             || (system_proxy.is_some() && system_proxy == self.system_proxy);
-        if &self.proxy == proxy && system_unchanged {
+        if &self.proxy == proxy && system_unchanged && !self.reconnect {
             return Ok(());
         }
         // Build first: invalid settings must fail this task instead of silently
@@ -159,6 +185,8 @@ impl Services {
         self.system_proxy = system_proxy;
         self.baidu_token = None;
         self.bing_session = None;
+        self.loopback_client = None;
+        self.reconnect = false;
         Ok(())
     }
 
@@ -173,23 +201,39 @@ impl Services {
         config: &Config,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<String> {
+        let result = self.ocr_task(png, selection, config, cancelled);
+        self.note_failure(&result);
+        result
+    }
+
+    fn note_failure(&mut self, result: &Result<String>) {
+        if result.as_ref().is_err_and(is_network_error) {
+            self.reconnect = true;
+        }
+    }
+
+    fn ocr_task(
+        &mut self,
+        png: &[u8],
+        selection: &str,
+        config: &Config,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<String> {
         anyhow::ensure!(!cancelled(), "任务已取消");
         self.configure_proxy(&config.proxy)?;
         if png.is_empty() {
-            return Err(ServiceError::InvalidInput("待识别图片为空").into());
+            return Err(ServiceError::InvalidInput("待识别图片为空".into()).into());
         }
-        if ["Mistral_", "OpenAI_", "Nvidia_"]
-            .iter()
-            .any(|prefix| selection.starts_with(prefix))
-        {
+        if selection.starts_with(crate::config::MODEL_SELECTION_PREFIX) {
             return self.ai_ocr(png, selection, config, cancelled);
         }
         if let Some(mode) = selection.strip_prefix("Baidu_") {
             require_credentials(&config.api_key, &config.secret_key, "百度 OCR")?;
             if png.len() > 3 * 1024 * 1024 {
-                return Err(
-                    ServiceError::InvalidInput("百度 OCR 图片超过 3 MiB，请缩小截图范围").into(),
-                );
+                return Err(ServiceError::InvalidInput(
+                    "百度 OCR 图片超过 3 MiB，请缩小截图范围".into(),
+                )
+                .into());
             }
             let endpoint = match mode {
                 "auto" | "accurate_basic" => "accurate_basic",
@@ -198,7 +242,7 @@ impl Services {
                 "general" => "general",
                 "table" => "table",
                 "formula" => "formula",
-                _ => return Err(ServiceError::InvalidInput("不支持的百度 OCR 模式").into()),
+                _ => return Err(ServiceError::InvalidInput("不支持的百度 OCR 模式".into()).into()),
             };
             let image = base64::engine::general_purpose::STANDARD.encode(png);
             let mut form = vec![("image", image.as_str()), ("detect_direction", "true")];
@@ -239,16 +283,17 @@ impl Services {
                 "腾讯 OCR",
             )?;
             if png.len() > 5 * 1024 * 1024 {
-                return Err(
-                    ServiceError::InvalidInput("腾讯 OCR 图片超过 5 MiB，请缩小截图范围").into(),
-                );
+                return Err(ServiceError::InvalidInput(
+                    "腾讯 OCR 图片超过 5 MiB，请缩小截图范围".into(),
+                )
+                .into());
             }
             let action = match mode {
                 "auto" | "general_accurate" => "GeneralAccurateOCR",
                 "general_basic" => "GeneralBasicOCR",
                 "table" => "RecognizeTableAccurateOCR",
                 "formula" => "RecognizeFormulaOCR",
-                _ => return Err(ServiceError::InvalidInput("不支持的腾讯 OCR 模式").into()),
+                _ => return Err(ServiceError::InvalidInput("不支持的腾讯 OCR 模式".into()).into()),
             };
             let body =
                 json!({"ImageBase64": base64::engine::general_purpose::STANDARD.encode(png)});
@@ -261,7 +306,10 @@ impl Services {
             )?;
             parse_tencent_ocr(&value, mode)
         } else {
-            Err(ServiceError::InvalidInput("本地 OCR 应由本地引擎处理，未发送云端请求").into())
+            Err(
+                ServiceError::InvalidInput("本地 OCR 应由本地引擎处理，未发送云端请求".into())
+                    .into(),
+            )
         }
     }
 
@@ -275,15 +323,26 @@ impl Services {
         config: &Config,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<String> {
+        let result = self.translate_task(text, config, cancelled);
+        self.note_failure(&result);
+        result
+    }
+
+    fn translate_task(
+        &mut self,
+        text: &str,
+        config: &Config,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<String> {
         anyhow::ensure!(!cancelled(), "任务已取消");
         self.configure_proxy(&config.proxy)?;
         if text.trim().is_empty() {
-            return Err(ServiceError::InvalidInput("待翻译文本为空").into());
+            return Err(ServiceError::InvalidInput("待翻译文本为空".into()).into());
         }
         let source = normalize_language(&config.source_lang)?;
         let target = normalize_language(&config.target_lang)?;
         if target == "auto" {
-            return Err(ServiceError::InvalidInput("请选择明确的目标语言").into());
+            return Err(ServiceError::InvalidInput("请选择明确的目标语言".into()).into());
         }
         // Preserve the chosen target language. The Python version silently reversed it.
         if source == target {
@@ -292,9 +351,11 @@ impl Services {
         let translated = match config.last_translate_selection.as_str() {
             "Baidu" => self.baidu_translate(text, source, target, config),
             "Tencent" => self.tencent_translate(text, source, target, config),
-            "OpenAI" | "Nvidia" => self.ai_translate(text, source, target, config, cancelled),
+            selection if crate::config::model_translator(selection).is_some() => {
+                self.ai_translate(text, source, target, config, cancelled)
+            }
             "默认" | "Bing" | "Edge" => self.bing_translate(text, source, target, cancelled),
-            _ => Err(ServiceError::InvalidInput("不支持的翻译服务").into()),
+            _ => Err(ServiceError::InvalidInput("不支持的翻译服务".into()).into()),
         }?;
         anyhow::ensure!(!cancelled(), "任务已取消");
         if translated.trim().is_empty() {
@@ -354,9 +415,10 @@ impl Services {
             "百度翻译",
         )?;
         if text.len() > 6000 {
-            return Err(
-                ServiceError::InvalidInput("百度翻译单次文本超过 6000 字节，请分段翻译").into(),
-            );
+            return Err(ServiceError::InvalidInput(
+                "百度翻译单次文本超过 6000 字节，请分段翻译".into(),
+            )
+            .into());
         }
         let salt = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -404,7 +466,7 @@ impl Services {
         )?;
         if text.chars().count() > 2000 || text.len() > 6000 {
             return Err(ServiceError::InvalidInput(
-                "腾讯翻译单次文本超过 2000 字符或 6000 字节，请分段翻译",
+                "腾讯翻译单次文本超过 2000 字符或 6000 字节，请分段翻译".into(),
             )
             .into());
         }
@@ -431,7 +493,7 @@ impl Services {
         let (host, version) = match service {
             "ocr" => ("ocr.tencentcloudapi.com", "2018-11-19"),
             "tmt" => ("tmt.tencentcloudapi.com", "2018-03-21"),
-            _ => return Err(ServiceError::InvalidInput("不支持的腾讯云服务").into()),
+            _ => return Err(ServiceError::InvalidInput("不支持的腾讯云服务".into()).into()),
         };
         let payload = serde_json::to_string(body)?;
         let timestamp = Utc::now().timestamp();
@@ -463,9 +525,10 @@ impl Services {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<String> {
         if text.chars().count() > 5000 {
-            return Err(
-                ServiceError::InvalidInput("默认翻译单次文本超过 5000 字符，请分段翻译").into(),
-            );
+            return Err(ServiceError::InvalidInput(
+                "默认翻译单次文本超过 5000 字符，请分段翻译".into(),
+            )
+            .into());
         }
         let source = edge_language(source);
         let target = edge_language(target);
@@ -536,7 +599,15 @@ impl Services {
         // Region redirects are followed only for this credential-free page GET,
         // with a Bing host allowlist and origin-scoped cookies. Every other
         // request, including translation POSTs, retains redirect::Policy::none.
-        self.bing_session = Some(bing::authorize(&self.client, cancelled)?);
+        let session = match bing::authorize(&self.client, cancelled) {
+            Err(error) if is_network_error(&error) && !cancelled() => {
+                // Retry once over new connections, as a restart would.
+                self.client = build_client(&self.proxy)?;
+                bing::authorize(&self.client, cancelled)?
+            }
+            result => result?,
+        };
+        self.bing_session = Some(session);
         Ok(())
     }
 }
@@ -662,7 +733,7 @@ fn translate_bing_chunks(
 
 fn require_credentials(id: &str, secret: &str, provider: &'static str) -> Result<()> {
     if id.trim().is_empty() || secret.trim().is_empty() {
-        return Err(ServiceError::Credentials(provider).into());
+        return Err(ServiceError::Credentials(provider.into()).into());
     }
     Ok(())
 }
@@ -687,10 +758,10 @@ fn send(request: RequestBuilder) -> Result<Response> {
     })
 }
 
-fn read_response(response: Response, provider: &'static str, limit: usize) -> Result<Vec<u8>> {
+fn read_response(response: Response, provider: &str, limit: usize) -> Result<Vec<u8>> {
     if !response.status().is_success() {
         return Err(ServiceError::Http {
-            provider,
+            provider: provider.to_owned().into(),
             status: response.status().as_u16(),
         }
         .into());
@@ -785,19 +856,27 @@ fn formula_field(value: &Value, array: &str, field: &str) -> Result<String> {
         .context(ServiceError::InvalidResponse("缺少识别结果数组"))?;
     let mut formulas = Vec::new();
     for item in items {
-        let text = required_str(item, field)?.trim();
-        // Match Mistral's display-math text while keeping the recognized LaTeX
-        // intact. Each provider result is one formula, including multiline TeX.
-        let latex = [("\\[", "\\]"), ("\\(", "\\)"), ("$$", "$$"), ("$", "$")]
-            .iter()
-            .find_map(|(open, close)| text.strip_prefix(open)?.strip_suffix(close))
-            .unwrap_or(text)
-            .trim();
-        if !latex.is_empty() {
-            formulas.push(format!("\\[\n{latex}\n\\]"));
-        }
+        // Each provider result is one formula, including multiline TeX.
+        formulas.extend(display_math(required_str(item, field)?));
     }
     Ok(formulas.join("\n\n"))
+}
+
+/// Match Mistral's display-math text while keeping the recognized LaTeX intact:
+/// strip one outer delimiter pair (and a leading `\displaystyle`), then wrap the
+/// formula in a `\[ … \]` block.
+pub(super) fn display_math(text: &str) -> Option<String> {
+    let text = text.trim();
+    let latex = [("\\[", "\\]"), ("\\(", "\\)"), ("$$", "$$"), ("$", "$")]
+        .iter()
+        .find_map(|(open, close)| text.strip_prefix(open)?.strip_suffix(close))
+        .unwrap_or(text)
+        .trim();
+    let latex = latex
+        .strip_prefix("\\displaystyle")
+        .map_or(latex, str::trim_start)
+        .trim();
+    (!latex.is_empty()).then(|| format!("\\[\n{latex}\n\\]"))
 }
 
 fn parse_baidu_ocr(value: &Value, mode: &str) -> Result<String> {
@@ -957,7 +1036,9 @@ fn tencent_language(language: &str) -> Result<&str> {
         "pt-PT" => Ok("pt"),
         "auto" | "en" | "ja" | "ko" | "fr" | "es" | "it" | "de" | "tr" | "ru" | "pt" | "vi"
         | "id" | "th" | "ms" | "ar" | "hi" => Ok(language),
-        _ => Err(ServiceError::InvalidInput("腾讯翻译不支持所选语言，请手动选择其他服务").into()),
+        _ => Err(
+            ServiceError::InvalidInput("腾讯翻译不支持所选语言，请手动选择其他服务".into()).into(),
+        ),
     }
 }
 

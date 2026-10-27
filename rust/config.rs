@@ -18,6 +18,148 @@ pub const OPENAI_MODEL: &str = "gpt-4.1-mini";
 pub const NVIDIA_OCR_MODEL: &str = "moonshotai/kimi-k3";
 pub const NVIDIA_TRANSLATE_MODEL: &str = "moonshotai/kimi-k3";
 
+/// Prefix of selections that refer to a user-defined model interface:
+/// OCR `Model.{id}_{auto|table|formula}`, translation `Model.{id}`.
+pub const MODEL_SELECTION_PREFIX: &str = "Model.";
+const MAX_MODEL_PROFILES: usize = 32;
+
+/// Wire protocol of a user-defined model interface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelProtocol {
+    /// `POST {base}/chat/completions`: OpenAI and most compatible gateways,
+    /// including DeepSeek, Qwen, GLM, Kimi, SiliconFlow, OpenRouter, Ollama and LM Studio.
+    #[default]
+    OpenaiChat,
+    /// `POST {base}/responses`: the OpenAI Responses API.
+    OpenaiResponses,
+    /// `POST {base}/messages`: the Anthropic Messages API.
+    Anthropic,
+    /// `POST {base}/models/{model}:generateContent`: the Google Gemini API.
+    Gemini,
+    /// `POST {base}/ocr`: the Mistral document OCR API (recognition only).
+    MistralOcr,
+}
+
+impl ModelProtocol {
+    pub const ALL: [Self; 5] = [
+        Self::OpenaiChat,
+        Self::OpenaiResponses,
+        Self::Anthropic,
+        Self::Gemini,
+        Self::MistralOcr,
+    ];
+
+    /// Whether the protocol can translate text (Mistral OCR only recognizes images).
+    pub fn translates(self) -> bool {
+        self != Self::MistralOcr
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OpenaiChat => "OpenAI Chat Completions 兼容",
+            Self::OpenaiResponses => "OpenAI Responses",
+            Self::Anthropic => "Anthropic Messages",
+            Self::Gemini => "Google Gemini",
+            Self::MistralOcr => "Mistral OCR",
+        }
+    }
+
+    /// Endpoint path relative to the base URL, shown in settings and used for requests.
+    pub fn path(self, model: &str) -> String {
+        match self {
+            Self::OpenaiChat => "chat/completions".into(),
+            Self::OpenaiResponses => "responses".into(),
+            Self::Anthropic => "messages".into(),
+            Self::Gemini => format!("models/{}:generateContent", gemini_model(model)),
+            Self::MistralOcr => "ocr".into(),
+        }
+    }
+}
+
+/// Gemini puts the model in the URL path. Accept an optional `models/` prefix but
+/// never characters that could change the path, query or host.
+pub fn gemini_model(model: &str) -> &str {
+    model.trim().strip_prefix("models/").unwrap_or(model.trim())
+}
+
+/// One user-defined model interface. Deliberately no Debug: it holds an API key.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelProfile {
+    /// Stable identifier used in selections: 1-32 of `a-z`, `0-9` and `-`.
+    pub id: String,
+    pub name: String,
+    pub protocol: ModelProtocol,
+    pub base_url: String,
+    pub api_key: String,
+    /// Empty when the interface is not used for recognition.
+    pub ocr_model: String,
+    /// Empty when the interface is not used for translation.
+    pub translate_model: String,
+}
+
+impl ModelProfile {
+    pub fn can_recognize(&self) -> bool {
+        !self.ocr_model.trim().is_empty()
+    }
+
+    pub fn can_translate(&self) -> bool {
+        self.protocol.translates() && !self.translate_model.trim().is_empty()
+    }
+
+    fn normalize(&mut self) -> Result<()> {
+        self.id = self.id.trim().to_owned();
+        anyhow::ensure!(
+            (1..=32).contains(&self.id.len())
+                && self
+                    .id
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'),
+            "模型接口编号无效"
+        );
+        self.name = self.name.trim().to_owned();
+        if self.name.is_empty() {
+            self.name = self.protocol.label().into();
+        }
+        anyhow::ensure!(
+            self.name.chars().count() <= 40 && !self.name.chars().any(char::is_control),
+            "模型接口名称过长或含有控制字符"
+        );
+        let name = self.name.clone();
+        self.api_key = self.api_key.trim().to_owned();
+        self.base_url = self.base_url.trim().trim_end_matches('/').to_owned();
+        anyhow::ensure!(!self.base_url.is_empty(), "模型接口「{name}」缺少服务地址");
+        generic_endpoint(&self.base_url, "").with_context(|| format!("模型接口「{name}」"))?;
+        if !self.protocol.translates() {
+            self.translate_model.clear();
+        }
+        for model in [&mut self.ocr_model, &mut self.translate_model] {
+            *model = model.trim().to_owned();
+            validate_model(model, self.protocol).with_context(|| format!("模型接口「{name}」"))?;
+        }
+        anyhow::ensure!(
+            self.can_recognize() || self.can_translate(),
+            "模型接口「{name}」需要至少填写识别模型或翻译模型"
+        );
+        Ok(())
+    }
+}
+
+/// `Model.{id}_{mode}` → (`id`, `mode`).
+pub fn model_ocr_selection(selection: &str) -> Option<(&str, &str)> {
+    selection
+        .strip_prefix(MODEL_SELECTION_PREFIX)?
+        .split_once('_')
+}
+
+/// `Model.{id}` → `id`.
+pub fn model_translator(selection: &str) -> Option<&str> {
+    selection
+        .strip_prefix(MODEL_SELECTION_PREFIX)
+        .filter(|id| !id.contains('_'))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
@@ -147,17 +289,9 @@ pub struct Config {
     pub tencent_secret_key: String,
     pub tencent_trans_secret_id: String,
     pub tencent_trans_secret_key: String,
-    pub mistral_api_key: String,
-    pub mistral_base_url: String,
-    pub mistral_ocr_model: String,
-    pub openai_api_key: String,
-    pub openai_base_url: String,
-    pub openai_ocr_model: String,
-    pub openai_translate_model: String,
-    pub nvidia_api_key: String,
-    pub nvidia_base_url: String,
-    pub nvidia_ocr_model: String,
-    pub nvidia_translate_model: String,
+    /// User-defined model interfaces (OpenAI-compatible, Responses, Anthropic,
+    /// Gemini, Mistral OCR). Replaces the former fixed Mistral/OpenAI/NVIDIA fields.
+    pub model_profiles: Vec<ModelProfile>,
     pub proxy: ProxyConfig,
     pub hotkey: String,
     pub translate_hotkey: String,
@@ -169,8 +303,19 @@ pub struct Config {
     #[serde(alias = "last_target_lang")]
     pub target_lang: String,
     pub hide_tray_icon: bool,
-    pub replace_newline: bool,
+    /// Layout analysis for text OCR: reading order and paragraph merging.
+    /// Formerly "合并文本换行" (join every line), stored as `replace_newline`.
+    #[serde(alias = "replace_newline")]
+    pub layout_analysis: bool,
     pub autostart: bool,
+    /// Look for a new release in the background about once a day.
+    pub check_updates: bool,
+    /// A release the user chose to skip; background checks stay quiet about it.
+    pub skipped_update_version: String,
+    /// Unix seconds of the last background check, so restarts do not re-check.
+    pub last_update_check: u64,
+    /// The version that last ran, to say "updated to vX" once after an update.
+    pub last_run_version: String,
     // The installation marker is authoritative; never persist a per-user override.
     #[serde(skip_serializing)]
     pub run_as_admin: bool,
@@ -189,17 +334,7 @@ impl Default for Config {
             tencent_secret_key: String::new(),
             tencent_trans_secret_id: String::new(),
             tencent_trans_secret_key: String::new(),
-            mistral_api_key: String::new(),
-            mistral_base_url: MISTRAL_BASE_URL.into(),
-            mistral_ocr_model: MISTRAL_OCR_MODEL.into(),
-            openai_api_key: String::new(),
-            openai_base_url: OPENAI_BASE_URL.into(),
-            openai_ocr_model: OPENAI_MODEL.into(),
-            openai_translate_model: OPENAI_MODEL.into(),
-            nvidia_api_key: String::new(),
-            nvidia_base_url: NVIDIA_BASE_URL.into(),
-            nvidia_ocr_model: NVIDIA_OCR_MODEL.into(),
-            nvidia_translate_model: NVIDIA_TRANSLATE_MODEL.into(),
+            model_profiles: Vec::new(),
             proxy: ProxyConfig::default(),
             hotkey: "F5".into(),
             translate_hotkey: "F2".into(),
@@ -209,8 +344,12 @@ impl Default for Config {
             source_lang: "auto".into(),
             target_lang: "zh-Hans".into(),
             hide_tray_icon: false,
-            replace_newline: false,
+            layout_analysis: false,
             autostart: false,
+            check_updates: true,
+            skipped_update_version: String::new(),
+            last_update_check: 0,
+            last_run_version: String::new(),
             run_as_admin: false,
             extra: BTreeMap::new(),
         }
@@ -316,9 +455,13 @@ impl Config {
         let mut value = read_json(path)?;
         if let Some(object) = value.as_object_mut() {
             migrate_silent_hotkey(object)?;
+            migrate_model_profiles(object);
             for (old, new) in [
                 ("last_source_lang", "source_lang"),
                 ("last_target_lang", "target_lang"),
+                // 2.0.x keeps unknown keys when it saves, so a file written by
+                // 2.1 and then by 2.0.x holds both names; both would be rejected.
+                ("replace_newline", "layout_analysis"),
             ] {
                 // Python's UI persisted last_*; the Rust format uses source/target_lang.
                 if legacy && object.contains_key(old) {
@@ -350,36 +493,28 @@ impl Config {
             &mut self.tencent_secret_key,
             &mut self.tencent_trans_secret_id,
             &mut self.tencent_trans_secret_key,
-            &mut self.mistral_api_key,
-            &mut self.openai_api_key,
-            &mut self.nvidia_api_key,
         ] {
             *secret = secret.trim().to_owned();
         }
-        for (base, default) in [
-            (&mut self.mistral_base_url, MISTRAL_BASE_URL),
-            (&mut self.openai_base_url, OPENAI_BASE_URL),
-            (&mut self.nvidia_base_url, NVIDIA_BASE_URL),
-        ] {
-            *base = base.trim().trim_end_matches('/').to_owned();
-            if base.is_empty() {
-                *base = default.into();
-            }
-            api_endpoint(base, "")?;
+        anyhow::ensure!(
+            self.model_profiles.len() <= MAX_MODEL_PROFILES,
+            "模型接口最多 {MAX_MODEL_PROFILES} 个"
+        );
+        let mut ids = std::collections::BTreeSet::new();
+        for profile in &mut self.model_profiles {
+            profile.normalize()?;
+            anyhow::ensure!(ids.insert(profile.id.clone()), "模型接口编号重复");
         }
-        for (model, default) in [
-            (&mut self.mistral_ocr_model, MISTRAL_OCR_MODEL),
-            (&mut self.openai_ocr_model, OPENAI_MODEL),
-            (&mut self.openai_translate_model, OPENAI_MODEL),
-            (&mut self.nvidia_ocr_model, NVIDIA_OCR_MODEL),
-            (&mut self.nvidia_translate_model, NVIDIA_TRANSLATE_MODEL),
-        ] {
-            *model = model.trim().to_owned();
-            if model.is_empty() {
-                *model = default.into();
+        // A selection that points at a removed (or no longer capable) interface falls
+        // back to the built-in engine instead of failing every later task.
+        if let Some((id, _)) = model_ocr_selection(&self.last_ocr_selection) {
+            if !self.profile(id).is_some_and(ModelProfile::can_recognize) {
+                self.last_ocr_selection = "默认".into();
             }
-            if model.len() > 256 || model.chars().any(char::is_control) {
-                bail!("模型名称过长或含有控制字符");
+        }
+        if let Some(id) = model_translator(&self.last_translate_selection) {
+            if !self.profile(id).is_some_and(ModelProfile::can_translate) {
+                self.last_translate_selection = "默认".into();
             }
         }
         self.hotkey = self.hotkey.trim().to_owned();
@@ -391,6 +526,10 @@ impl Config {
             &self.silent_hotkey,
         )?;
         Ok(())
+    }
+
+    pub fn profile(&self, id: &str) -> Option<&ModelProfile> {
+        self.model_profiles.iter().find(|profile| profile.id == id)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -438,6 +577,154 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+/// Former fixed providers: (id, name, protocol, field prefix, selection prefix,
+/// default base URL, default OCR model, default translation model).
+type LegacyProvider = (
+    &'static str,
+    &'static str,
+    ModelProtocol,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
+const LEGACY_PROVIDERS: &[LegacyProvider] = &[
+    (
+        "openai",
+        "OpenAI",
+        ModelProtocol::OpenaiChat,
+        "openai",
+        "OpenAI",
+        OPENAI_BASE_URL,
+        OPENAI_MODEL,
+        OPENAI_MODEL,
+    ),
+    (
+        "nvidia",
+        "NVIDIA",
+        ModelProtocol::OpenaiChat,
+        "nvidia",
+        "Nvidia",
+        NVIDIA_BASE_URL,
+        NVIDIA_OCR_MODEL,
+        NVIDIA_TRANSLATE_MODEL,
+    ),
+    (
+        "mistral",
+        "Mistral OCR",
+        ModelProtocol::MistralOcr,
+        "mistral",
+        "Mistral",
+        MISTRAL_BASE_URL,
+        MISTRAL_OCR_MODEL,
+        "",
+    ),
+    (
+        "generic",
+        "通用模型",
+        ModelProtocol::OpenaiChat,
+        "generic",
+        "Generic",
+        "",
+        "",
+        "",
+    ),
+];
+
+/// Turn the former fixed Mistral/OpenAI/NVIDIA/generic fields into model interfaces.
+/// Only configured or selected providers become interfaces; their legacy fields
+/// (including keys) are removed so secrets are not kept twice. Runs in memory only:
+/// the file changes when the user next saves.
+fn migrate_model_profiles(object: &mut serde_json::Map<String, Value>) {
+    let mut profiles = Vec::new();
+    for &(id, name, protocol, field, selection, base, ocr, translate) in LEGACY_PROVIDERS {
+        let mut take = |suffix: &str| -> String {
+            object
+                .remove(&format!("{field}_{suffix}"))
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default()
+        };
+        let api_key = take("api_key");
+        let base_url = take("base_url");
+        let ocr_model = take("ocr_model");
+        let translate_model = take("translate_model");
+        let protocol = object
+            .remove(&format!("{field}_protocol"))
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or(protocol);
+        let selected = |key: &str, exact: bool| {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| {
+                    if exact {
+                        value == selection
+                    } else {
+                        value.starts_with(&format!("{selection}_"))
+                    }
+                })
+        };
+        let in_use =
+            selected("last_ocr_selection", false) || selected("last_translate_selection", true);
+        let configured = if id == "generic" {
+            !base_url.trim().is_empty()
+        } else {
+            !api_key.trim().is_empty()
+        };
+        if object.contains_key("model_profiles") || !(configured || in_use) {
+            continue;
+        }
+        let or = |value: String, default: &str| {
+            if value.trim().is_empty() {
+                default.to_owned()
+            } else {
+                value
+            }
+        };
+        let profile = ModelProfile {
+            id: id.into(),
+            name: name.into(),
+            protocol,
+            base_url: or(base_url, base),
+            api_key,
+            ocr_model: or(ocr_model, ocr),
+            translate_model: or(translate_model, translate),
+        };
+        if !profile.base_url.trim().is_empty() {
+            profiles.push(profile);
+        }
+    }
+    if object.contains_key("model_profiles") {
+        return;
+    }
+    let ids: Vec<_> = profiles.iter().map(|profile| profile.id.clone()).collect();
+    for key in ["last_ocr_selection", "last_translate_selection"] {
+        let Some(value) = object.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        let remapped = LEGACY_PROVIDERS
+            .iter()
+            .find_map(|&(id, _, _, _, selection, ..)| {
+                let rest = value.strip_prefix(selection)?;
+                (rest.is_empty() || rest.starts_with('_')).then(|| (id, rest.to_owned()))
+            })
+            .map(|(id, rest)| {
+                if ids.iter().any(|known| known == id) {
+                    format!("{MODEL_SELECTION_PREFIX}{id}{rest}")
+                } else {
+                    "默认".into()
+                }
+            });
+        if let Some(remapped) = remapped {
+            object.insert(key.into(), Value::String(remapped));
+        }
+    }
+    if let Ok(value) = serde_json::to_value(profiles) {
+        object.insert("model_profiles".into(), value);
     }
 }
 
@@ -497,6 +784,69 @@ pub(crate) fn api_endpoint(base: &str, path: &str) -> Result<reqwest::Url> {
         .map_err(|_| anyhow!("API 地址格式无效"))
 }
 
+/// Like [`api_endpoint`], but also accepts plain HTTP on loopback hosts so local
+/// runtimes (Ollama, LM Studio, vLLM, llama.cpp) work. Remote HTTP is still rejected.
+pub fn generic_endpoint(base: &str, path: &str) -> Result<reqwest::Url> {
+    anyhow::ensure!(
+        base.len() <= 2048 && !base.chars().any(char::is_control),
+        "API 地址无效"
+    );
+    let parsed = reqwest::Url::parse(base.trim()).map_err(|_| anyhow!("API 地址格式无效"))?;
+    if parsed.scheme() == "http" {
+        anyhow::ensure!(
+            is_loopback(&parsed)
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+                && parsed.query().is_none()
+                && parsed.fragment().is_none(),
+            "HTTP 地址仅允许本机服务（localhost / 127.0.0.1 / ::1）；远程服务请使用 HTTPS"
+        );
+        return reqwest::Url::parse(&format!(
+            "{}/{}",
+            parsed.as_str().trim_end_matches('/'),
+            path
+        ))
+        .map_err(|_| anyhow!("API 地址格式无效"));
+    }
+    api_endpoint(base, path)
+}
+
+/// Whether a (possibly incomplete) generic base URL points at this machine.
+pub fn generic_url_is_loopback(base: &str) -> bool {
+    reqwest::Url::parse(base.trim()).is_ok_and(|url| is_loopback(&url))
+}
+
+pub(crate) fn is_loopback(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Model names are sent in JSON bodies; Gemini also places them in the URL path.
+pub(crate) fn validate_model(model: &str, protocol: ModelProtocol) -> Result<()> {
+    anyhow::ensure!(
+        model.len() <= 256 && !model.chars().any(char::is_control),
+        "模型名称过长或含有控制字符"
+    );
+    if protocol == ModelProtocol::Gemini && !model.is_empty() {
+        let name = gemini_model(model);
+        anyhow::ensure!(
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.')),
+            "Gemini 模型名称只能包含字母、数字、短横线、下划线和点"
+        );
+    }
+    Ok(())
+}
+
 fn default_path() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("APPDATA").filter(|s| !s.is_empty()) {
         return Ok(PathBuf::from(dir).join("SightOCR").join("config.json"));
@@ -549,6 +899,25 @@ pub fn normalize_language(language: &str) -> Result<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_saved_by_2_1_then_2_0_with_both_layout_names_loads() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("config.json");
+        // 2.0.x keeps 2.1's keys when it saves, next to its own old names.
+        std::fs::write(
+            &path,
+            r#"{"replace_newline":false,"layout_analysis":true,"hotkey":"F5",
+                "translate_hotkey":"F2","silent_hotkey":"F4","model_profiles":[],
+                "openai_api_key":"","openai_base_url":"https://api.openai.com/v1"}"#,
+        )?;
+        let config = Config::read(&path)?;
+        assert!(config.layout_analysis, "the 2.1 name wins");
+        // An old file with only the 2.0 name still migrates.
+        std::fs::write(&path, r#"{"replace_newline":true}"#)?;
+        assert!(Config::read(&path)?.layout_analysis);
+        Ok(())
+    }
 
     #[test]
     fn fresh_hotkeys_are_f5_f2_f4_and_legacy_defaults_migrate_once() -> Result<()> {
@@ -604,7 +973,10 @@ mod tests {
             assert_eq!(config.translate_hotkey, translate);
             assert_eq!(config.silent_hotkey, silent);
             assert_eq!(config.extra["future_option"], true);
-            assert_eq!(config.openai_api_key, "synthetic-secret");
+            assert_eq!(
+                config.profile("openai").unwrap().api_key,
+                "synthetic-secret"
+            );
         }
         Ok(())
     }
@@ -713,31 +1085,180 @@ mod tests {
     }
 
     #[test]
-    fn ai_fields_migrate_without_erasing_legacy_keys_or_unknown_preferences() -> Result<()> {
+    fn fixed_ai_providers_migrate_to_model_interfaces_and_selections_follow() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("config.json");
         fs::write(
             &path,
-            r#"{"api_key":"old-ocr-key","appearance":"dark","future_option":42}"#,
+            r#"{"api_key":"old-ocr-key","appearance":"dark","future_option":42,
+               "openai_api_key":" synthetic-ai-key ","openai_base_url":"https://gateway.example/custom/v1/",
+               "openai_translate_model":"custom/model",
+               "nvidia_api_key":"","nvidia_base_url":"https://integrate.api.nvidia.com/v1",
+               "mistral_api_key":"synthetic-mistral",
+               "generic_protocol":"gemini","generic_base_url":"https://generativelanguage.example/v1beta",
+               "generic_api_key":"g","generic_ocr_model":"models/gemini-test",
+               "last_ocr_selection":"Mistral_table","last_translate_selection":"OpenAI"}"#,
         )?;
-        let mut config = Config::read(&path)?;
+        let original = fs::read(&path)?;
+        let config = Config::read(&path)?;
+        assert_eq!(
+            fs::read(&path)?,
+            original,
+            "loading must not rewrite config"
+        );
+        let ids: Vec<_> = config
+            .model_profiles
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect();
+        // NVIDIA had no key and was not selected, so it is not created.
+        assert_eq!(ids, ["openai", "mistral", "generic"]);
+        let openai = config.profile("openai").unwrap();
+        assert_eq!(openai.api_key, "synthetic-ai-key");
+        assert_eq!(openai.base_url, "https://gateway.example/custom/v1");
+        assert_eq!(openai.ocr_model, OPENAI_MODEL);
+        assert_eq!(openai.translate_model, "custom/model");
+        let mistral = config.profile("mistral").unwrap();
+        assert_eq!(mistral.protocol, ModelProtocol::MistralOcr);
+        assert_eq!(mistral.base_url, MISTRAL_BASE_URL);
+        assert_eq!(mistral.ocr_model, MISTRAL_OCR_MODEL);
+        assert!(!mistral.can_translate());
+        let generic = config.profile("generic").unwrap();
+        assert_eq!(generic.protocol, ModelProtocol::Gemini);
+        assert_eq!(generic.ocr_model, "models/gemini-test");
+        assert_eq!(config.last_ocr_selection, "Model.mistral_table");
+        assert_eq!(config.last_translate_selection, "Model.openai");
         assert_eq!(config.api_key, "old-ocr-key");
-        assert!(config.mistral_api_key.is_empty());
-        assert_eq!(config.mistral_ocr_model, MISTRAL_OCR_MODEL);
-        assert_eq!(config.openai_ocr_model, OPENAI_MODEL);
-        assert_eq!(config.nvidia_ocr_model, NVIDIA_OCR_MODEL);
-        config.openai_api_key = " synthetic-ai-key ".into();
-        config.openai_base_url = " https://gateway.example/custom/v1/ ".into();
-        config.openai_translate_model = " custom/model ".into();
         config.save(&path)?;
-        let saved = Config::read(&path)?;
-        assert_eq!(saved.openai_api_key, "synthetic-ai-key");
-        assert_eq!(saved.openai_base_url, "https://gateway.example/custom/v1");
-        assert_eq!(saved.openai_translate_model, "custom/model");
-        assert_eq!(saved.api_key, "old-ocr-key");
-        assert_eq!(saved.extra["appearance"], "dark");
-        assert_eq!(saved.extra["future_option"], 42);
-        assert!(!saved.extra.contains_key("openai_api_key"));
+        let saved: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        for legacy in [
+            "openai_api_key",
+            "mistral_api_key",
+            "generic_base_url",
+            "nvidia_base_url",
+        ] {
+            assert!(
+                saved.get(legacy).is_none(),
+                "{legacy} must not be kept twice"
+            );
+        }
+        assert_eq!(saved["appearance"], "dark");
+        assert_eq!(saved["future_option"], 42);
+        assert_eq!(saved["model_profiles"][0]["protocol"], "openai_chat");
+        let reloaded = Config::read(&path)?;
+        assert!(reloaded.model_profiles == config.model_profiles);
+        assert_eq!(reloaded.last_translate_selection, "Model.openai");
+        Ok(())
+    }
+
+    #[test]
+    fn unconfigured_selected_provider_migrates_with_defaults_and_unknown_falls_back() -> Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("config.json");
+        fs::write(
+            &path,
+            r#"{"last_ocr_selection":"Nvidia_formula","last_translate_selection":"Generic"}"#,
+        )?;
+        let config = Config::read(&path)?;
+        // The selected NVIDIA interface is kept (with documented defaults) so the user
+        // only needs to add a key; the empty generic interface cannot be kept.
+        let nvidia = config.profile("nvidia").unwrap();
+        assert_eq!(nvidia.base_url, NVIDIA_BASE_URL);
+        assert_eq!(nvidia.ocr_model, NVIDIA_OCR_MODEL);
+        assert_eq!(config.last_ocr_selection, "Model.nvidia_formula");
+        assert_eq!(config.last_translate_selection, "默认");
+        assert!(config.profile("generic").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn model_interfaces_validate_and_selections_to_removed_interfaces_reset() -> Result<()> {
+        let valid = ModelProfile {
+            id: "tokenhub".into(),
+            name: " 混元 ".into(),
+            protocol: ModelProtocol::OpenaiChat,
+            base_url: " https://tokenhub.example/v1/ ".into(),
+            api_key: " key ".into(),
+            ocr_model: "vision".into(),
+            translate_model: "text".into(),
+        };
+        let mut config = Config {
+            model_profiles: vec![valid.clone()],
+            last_ocr_selection: "Model.tokenhub_table".into(),
+            last_translate_selection: "Model.tokenhub".into(),
+            ..Config::default()
+        };
+        config.normalize()?;
+        let profile = &config.model_profiles[0];
+        assert_eq!(profile.name, "混元");
+        assert_eq!(profile.base_url, "https://tokenhub.example/v1");
+        assert_eq!(profile.api_key, "key");
+        assert_eq!(config.last_ocr_selection, "Model.tokenhub_table");
+        assert_eq!(
+            model_ocr_selection(&config.last_ocr_selection),
+            Some(("tokenhub", "table"))
+        );
+        assert_eq!(
+            model_translator(&config.last_translate_selection),
+            Some("tokenhub")
+        );
+        // Removing the interface resets both selections to the built-in engines.
+        config.model_profiles.clear();
+        config.normalize()?;
+        assert_eq!(config.last_ocr_selection, "默认");
+        assert_eq!(config.last_translate_selection, "默认");
+        for broken in [
+            ModelProfile {
+                id: "Bad_ID".into(),
+                ..valid.clone()
+            },
+            ModelProfile {
+                base_url: String::new(),
+                ..valid.clone()
+            },
+            ModelProfile {
+                base_url: "http://remote.example/v1".into(),
+                ..valid.clone()
+            },
+            ModelProfile {
+                ocr_model: String::new(),
+                translate_model: String::new(),
+                ..valid.clone()
+            },
+            ModelProfile {
+                name: "x".repeat(41),
+                ..valid.clone()
+            },
+            ModelProfile {
+                protocol: ModelProtocol::Gemini,
+                ocr_model: "a/b".into(),
+                ..valid.clone()
+            },
+        ] {
+            let mut config = Config {
+                model_profiles: vec![broken],
+                ..Config::default()
+            };
+            assert!(config.normalize().is_err());
+        }
+        let mut duplicate = Config {
+            model_profiles: vec![valid.clone(), valid.clone()],
+            ..Config::default()
+        };
+        assert!(duplicate.normalize().is_err());
+        // Mistral OCR cannot translate; its translation model is cleared.
+        let mut mistral = Config {
+            model_profiles: vec![ModelProfile {
+                protocol: ModelProtocol::MistralOcr,
+                ..valid
+            }],
+            last_translate_selection: "Model.tokenhub".into(),
+            ..Config::default()
+        };
+        mistral.normalize()?;
+        assert!(mistral.model_profiles[0].translate_model.is_empty());
+        assert_eq!(mistral.last_translate_selection, "默认");
         Ok(())
     }
 
@@ -760,14 +1281,30 @@ mod tests {
             api_endpoint("https://gateway.example/custom/v1/", "chat/completions")?.as_str(),
             "https://gateway.example/custom/v1/chat/completions"
         );
-        let mut config = Config {
-            mistral_base_url: " ".into(),
-            nvidia_translate_model: " ".into(),
-            ..Config::default()
-        };
-        config.normalize()?;
-        assert_eq!(config.mistral_base_url, MISTRAL_BASE_URL);
-        assert_eq!(config.nvidia_translate_model, NVIDIA_TRANSLATE_MODEL);
+        Ok(())
+    }
+
+    #[test]
+    fn model_interfaces_allow_http_only_on_loopback() -> Result<()> {
+        for base in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://[::1]:8000/v1",
+            "https://gateway.example/v1",
+        ] {
+            generic_endpoint(base, "chat/completions")?;
+        }
+        for base in [
+            "http://192.168.1.10:11434/v1",
+            "http://example.com/v1",
+            "http://localhost.example.com/v1",
+            "http://user:private-key@localhost/v1",
+            "http://localhost/v1?key=private-key",
+        ] {
+            let error = generic_endpoint(base, "").unwrap_err().to_string();
+            assert!(!error.contains("private-key"), "{base}");
+        }
+        assert!(api_endpoint("http://localhost:11434/v1", "").is_err());
         Ok(())
     }
 

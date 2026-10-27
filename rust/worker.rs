@@ -1,4 +1,8 @@
-use crate::{config::Config, ocr::OneOcr, services::Services};
+use crate::{
+    config::Config,
+    ocr::{OneOcr, Recognition},
+    services::Services,
+};
 use anyhow::{Context, Result};
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
@@ -67,14 +71,14 @@ impl Engine {
         Ok(self.services.as_mut().expect("services initialized"))
     }
 
-    fn local(&mut self, image: &RgbaImage, table: bool) -> Result<String> {
+    fn local(&mut self, image: &RgbaImage, mode: Recognition) -> Result<String> {
         if self.local.is_none() {
             self.local = Some(OneOcr::new(&self.resources)?);
         }
         self.local
             .as_mut()
             .expect("OCR initialized")
-            .recognize(image, table)
+            .recognize(image, mode)
     }
 
     pub fn execute(&mut self, request: Request, output: &mut Output) -> Result<()> {
@@ -123,6 +127,18 @@ impl Engine {
                 );
                 let selection = &config.last_ocr_selection;
                 let table = selection.ends_with("_table");
+                // Layout analysis applies to text only: tables keep their TSV
+                // structure and formulas their line breaks.
+                let layout = config.layout_analysis && !table && !selection.ends_with("_formula");
+                let mode = if table {
+                    Recognition::Table
+                } else if layout {
+                    Recognition::Layout
+                } else {
+                    Recognition::Text
+                };
+                // Cloud text has no coordinates; it gets the text-only fallback.
+                let mut positioned = true;
                 progress(Progress {
                     id,
                     stage: ProgressStage::Recognizing,
@@ -140,7 +156,10 @@ impl Engine {
                         &config,
                         &cancelled,
                     ) {
-                        Ok(text) => text,
+                        Ok(text) => {
+                            positioned = false;
+                            text
+                        }
                         Err(error) => {
                             anyhow::ensure!(!cancelled(), "任务已取消");
                             output.warning = Some(format!(
@@ -153,17 +172,14 @@ impl Engine {
                                 warning: output.warning.clone(),
                             });
                             anyhow::ensure!(!cancelled(), "任务已取消");
-                            self.local(&image, table)?
+                            self.local(&image, mode)?
                         }
                     }
                 } else {
-                    self.local(&image, table)?
+                    self.local(&image, mode)?
                 };
                 anyhow::ensure!(!text.trim().is_empty(), "未识别到文字，请选择更清晰的区域");
-                let text = normalize_text(
-                    &text,
-                    config.replace_newline && !table && !selection.ends_with("_formula"),
-                );
+                let text = normalize_text(&text, layout && !positioned);
                 output.recognized = Some(text.clone());
                 if translate {
                     anyhow::ensure!(!cancelled(), "任务已取消");
@@ -186,20 +202,18 @@ impl Engine {
 }
 
 fn is_cloud_ocr(selection: &str) -> bool {
-    ["Baidu_", "Tencent_", "Mistral_", "OpenAI_", "Nvidia_"]
+    ["Baidu_", "Tencent_", crate::config::MODEL_SELECTION_PREFIX]
         .iter()
         .any(|prefix| selection.starts_with(prefix))
 }
 
-/// Never join table rows: tabs and newlines carry spreadsheet structure.
-pub fn normalize_text(text: &str, join_lines: bool) -> String {
+/// Unify line endings. With `paragraphs`, text without coordinates (cloud OCR)
+/// gets text-only paragraph merging. Never applied to tables: tabs and
+/// newlines carry spreadsheet structure.
+pub fn normalize_text(text: &str, paragraphs: bool) -> String {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
-    if join_lines {
-        text.lines()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")
+    if paragraphs {
+        crate::ocr::paragraphs_from_text(&text)
     } else {
         text
     }
@@ -246,10 +260,8 @@ mod tests {
     #[test]
     fn text_newlines_are_normalized_but_table_layout_survives() {
         assert_eq!(normalize_text("A\tB\r\n1\t2", false), "A\tB\n1\t2");
-        assert_eq!(
-            normalize_text("  hello\r\n\r\n world  ", true),
-            "hello world"
-        );
+        assert_eq!(normalize_text("  hello\r\n world  ", true), "hello world");
+        assert_eq!(normalize_text("first\r\n\r\nsecond", true), "first\nsecond");
     }
     #[test]
     fn empty_translation_is_rejected_without_network() {
@@ -317,7 +329,7 @@ mod tests {
 
     #[test]
     fn ai_ocr_routes_to_the_selected_cloud_and_cancellation_prevents_all_engines() {
-        for provider in ["Mistral", "OpenAI", "Nvidia"] {
+        for provider in ["Model.mistral", "Model.openai", "Model.local-1"] {
             for mode in ["auto", "table", "formula"] {
                 let selection = format!("{provider}_{mode}");
                 assert!(is_cloud_ocr(&selection));

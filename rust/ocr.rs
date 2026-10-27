@@ -21,7 +21,23 @@ use windows_sys::Win32::System::LibraryLoader::{
     LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
 
+mod layout;
 mod table;
+pub mod text;
+
+pub use layout::paragraphs_from_text;
+
+/// What local recognition returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recognition {
+    /// Recognized lines in OneOCR's order, one per line.
+    Text,
+    /// Layout analysis: blocks in reading order, wrapped lines joined into
+    /// paragraphs, one paragraph per line.
+    Layout,
+    /// Table rows as TSV.
+    Table,
+}
 
 // Enlarge only small table captures. The resampled RGBA and BGRA buffers each
 // use at most 24 MB, with room for Lanczos's intermediate data under the existing
@@ -29,6 +45,19 @@ mod table;
 const TABLE_UPSCALE_MAX_EDGE: u32 = 1600;
 const TABLE_UPSCALE_MAX_PIXELS: u64 = 1_500_000;
 const TABLE_UPSCALE_FACTOR: u32 = 2;
+
+#[cfg(test)]
+thread_local! {
+    /// The most recent table recognition's OCR lines, for diagnostics in tests.
+    pub(crate) static LAST_TABLE_LINES: std::cell::RefCell<Vec<table::TextLine>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// The most recent table recognition's original four-point OCR boxes.
+    pub(crate) static LAST_TABLE_QUADS: std::cell::RefCell<Vec<(String, table::Quad)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// The levelled image when the last table was straightened.
+    pub(crate) static LAST_TABLE_IMAGE: std::cell::RefCell<Option<RgbaImage>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 type Handle = *mut c_void;
 type CreateOptions = unsafe extern "C" fn(*mut Handle) -> u32;
@@ -275,7 +304,9 @@ impl OneOcr {
         })
     }
 
-    pub fn recognize(&mut self, image: &RgbaImage, table: bool) -> Result<String> {
+    pub fn recognize(&mut self, image: &RgbaImage, mode: Recognition) -> Result<String> {
+        let table = mode == Recognition::Table;
+        let positioned = mode != Recognition::Text;
         let (pixels, width, height, input_scale) = prepare_recognition_bgra(image, table)?;
         let info = ImageInfo {
             image_type: 3,
@@ -301,6 +332,7 @@ impl OneOcr {
         ensure!(count <= 1000, "OneOCR 返回的行数超出配置上限: {count}");
         let mut texts = Vec::with_capacity(count as usize);
         let mut lines = Vec::with_capacity(count as usize);
+        let mut quads = Vec::with_capacity(count as usize);
         for index in 0..count {
             let mut line = ptr::null_mut();
             check(
@@ -321,7 +353,7 @@ impl OneOcr {
             let text = unsafe { CStr::from_ptr(content) }
                 .to_string_lossy()
                 .into_owned();
-            if table {
+            if positioned {
                 let mut bounds = ptr::null();
                 check(
                     // SAFETY: line and the bounding-box output slot are valid.
@@ -333,15 +365,71 @@ impl OneOcr {
                 // BoundingBox borrowed from result; copy it before release.
                 let bounds = bounds_in_original_image(unsafe { *bounds }, input_scale);
                 let rect = table::Rect::from_box(bounds)?;
+                quads.push(
+                    [
+                        bounds.top_left,
+                        bounds.top_right,
+                        bounds.bottom_right,
+                        bounds.bottom_left,
+                    ]
+                    .map(|point| (point.x, point.y)),
+                );
                 lines.push(table::TextLine { text, rect });
             } else {
                 texts.push(text);
             }
         }
-        Ok(if table {
-            table::reconstruct(&lines, image)
+        // A tilted photo or scan is levelled, boxes included, before rules
+        // and rows are measured.
+        let straight = if table {
+            table::straighten(image, &quads)
         } else {
-            texts.join("\n")
+            None
+        };
+        let image = match straight {
+            Some((level, rects)) => {
+                for (line, rect) in lines.iter_mut().zip(rects) {
+                    line.rect = rect;
+                }
+                std::borrow::Cow::Owned(level)
+            }
+            None => std::borrow::Cow::Borrowed(image),
+        };
+        #[cfg(test)]
+        if table {
+            LAST_TABLE_QUADS.with(|last| {
+                *last.borrow_mut() = lines
+                    .iter()
+                    .map(|line| line.text.clone())
+                    .zip(quads.iter().copied())
+                    .collect();
+            });
+            LAST_TABLE_IMAGE.with(|last| {
+                *last.borrow_mut() =
+                    matches!(image, std::borrow::Cow::Owned(_)).then(|| image.clone().into_owned());
+            });
+            LAST_TABLE_LINES.with(|last| {
+                *last.borrow_mut() = lines
+                    .iter()
+                    .map(|line| table::TextLine {
+                        text: line.text.clone(),
+                        rect: line.rect,
+                    })
+                    .collect();
+            });
+        }
+        Ok(match mode {
+            Recognition::Table => table::reconstruct(&lines, &image),
+            Recognition::Layout => {
+                // Level the boxes of a tilted capture so rows and indents compare.
+                if let Some(rects) = table::level_boxes(&image, &quads) {
+                    for (line, rect) in lines.iter_mut().zip(rects) {
+                        line.rect = rect;
+                    }
+                }
+                layout::analyze(&lines)
+            }
+            Recognition::Text => texts.join("\n"),
         })
     }
 }
@@ -604,6 +692,66 @@ mod tests {
         );
     }
 
+    /// Diagnostics: `SIGHTOCR_TABLE_DEBUG=<png>[;<png>...]` prints OCR boxes, detected
+    /// rules and the reconstructed TSV for each image.
+    #[test]
+    #[ignore = "Diagnostics; requires bundled OneOCR and SIGHTOCR_TABLE_DEBUG"]
+    fn table_debug_dump() {
+        let Some(paths) = std::env::var_os("SIGHTOCR_TABLE_DEBUG") else {
+            return;
+        };
+        std::thread::spawn(move || {
+            let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/oneocr");
+            let mut engine = OneOcr::new(&directory).unwrap();
+            for path in paths.to_string_lossy().split(';') {
+                let image = image::open(path).unwrap().to_rgba8();
+                let tsv = engine.recognize(&image, Recognition::Table).unwrap();
+                println!("==== {path}");
+                // SIGHTOCR_TABLE_FIXTURE_DIR writes frozen boxes for samples.rs.
+                if let Some(directory) = std::env::var_os("SIGHTOCR_TABLE_FIXTURE_DIR") {
+                    let stem = Path::new(path).file_stem().unwrap().to_string_lossy().into_owned();
+                    let round = |v: f32| (v * 100.0).round() / 100.0;
+                    let lines: Vec<_> = LAST_TABLE_QUADS.with(|quads| {
+                        quads
+                            .borrow()
+                            .iter()
+                            .map(|(text, quad)| {
+                                let xs = quad.map(|p| p.0);
+                                let ys = quad.map(|p| p.1);
+                                serde_json::json!({
+                                    "text": text,
+                                    "left": round(xs.iter().copied().fold(f32::INFINITY, f32::min)),
+                                    "top": round(ys.iter().copied().fold(f32::INFINITY, f32::min)),
+                                    "right": round(xs.iter().copied().fold(f32::NEG_INFINITY, f32::max)),
+                                    "bottom": round(ys.iter().copied().fold(f32::NEG_INFINITY, f32::max)),
+                                    "quad": quad.map(|p| [round(p.0), round(p.1)]),
+                                })
+                            })
+                            .collect()
+                    });
+                    std::fs::write(
+                        Path::new(&directory).join(format!("{stem}.json")),
+                        serde_json::to_string(&lines).unwrap(),
+                    )
+                    .unwrap();
+                }
+                let level = LAST_TABLE_IMAGE.with(|last| last.borrow_mut().take());
+                if let Some(level) = &level {
+                    println!("  straightened to {}x{}", level.width(), level.height());
+                }
+                LAST_TABLE_LINES.with(|lines| {
+                    for line in lines.borrow().iter() {
+                        println!("  {:?} {:?}", line.text, line.rect);
+                    }
+                    table::debug_rules(&lines.borrow(), level.as_ref().unwrap_or(&image));
+                });
+                println!("{tsv}");
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     #[ignore = "Requires bundled Windows OneOCR DLLs/model; run with --ignored"]
     fn bundled_engine_recognizes_fixture_and_releases_repeatedly() {
@@ -614,12 +762,12 @@ mod tests {
                 .to_rgba8();
             for _ in 0..2 {
                 let mut engine = OneOcr::new(&directory).unwrap();
-                let text = engine.recognize(&image, false).unwrap();
+                let text = engine.recognize(&image, Recognition::Text).unwrap();
                 assert!(
                     text.contains("Alpha") && text.contains("100"),
                     "Unexpected OCR: {text}"
                 );
-                let table = engine.recognize(&image, true).unwrap();
+                let table = engine.recognize(&image, Recognition::Table).unwrap();
                 assert!(
                     table.contains("Alpha\t100"),
                     "Unexpected table OCR: {table}"
@@ -658,7 +806,7 @@ mod tests {
                     image.height() * factor,
                     image::imageops::FilterType::Triangle,
                 );
-                let table = engine.recognize(&scaled, true).unwrap();
+                let table = engine.recognize(&scaled, Recognition::Table).unwrap();
                 assert_eq!(
                     table, "Name\tAmount\nAlpha\t100\nBeta\t200",
                     "scale={factor}"

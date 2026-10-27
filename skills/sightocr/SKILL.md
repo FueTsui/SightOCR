@@ -11,10 +11,11 @@ description: 使用 SightOCR MCP 识别本地图片或表格、翻译文字，�
 
 - 图片文字：调用 `sightocr_ocr`，参数 `image_path` 是 MCP 服务所在机器可访问的本地图片绝对路径；支持 PNG/JPEG/BMP/WebP。
 - 图片表格：同一工具设置 `table: true`，结果为 TSV。保留制表符、行列和空单元格，不猜填缺失内容。
+- 段落文字（文章、文档截图、双栏排版）：设置 `layout: true` 进行版面分析，按阅读顺序输出，每个段落一行，因宽度换行的行已合并；适合随后翻译。
 - 翻译：调用 `sightocr_translate`，必填 `text`，可选 `source_lang`、`target_lang`、`provider`。目标语言应取自用户要求；语言代码不确定时先调用 `sightocr_languages`（空参数对象）。`auto` 仅用于源语言。
 - 识别后翻译：先 OCR，检查成功后把 `structuredContent.text` 传给翻译工具。分别展示原文和译文，保留换行；表格翻译须保留列对应关系。
 
-翻译服务可选 `bing`、`baidu`、`tencent`、`openai`、`nvidia`；省略时使用 SightOCR 已保存设置。不要读取或输出凭据。OCR 在本机执行；翻译会将文字发给所选服务，按用户授权的内容调用。
+翻译服务可选 `bing`、`baidu`、`tencent`、`openai`、`nvidia`、`generic`（设置中配置的通用模型接口）；省略时使用 SightOCR 已保存设置。不要读取或输出凭据。OCR 在本机执行；翻译会将文字发给所选服务，按用户授权的内容调用。
 
 ## 结果与边界
 

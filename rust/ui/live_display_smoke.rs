@@ -10,13 +10,13 @@ use anyhow::{ensure, Context, Result};
 use eframe::egui::{Color32, ColorImage};
 use std::{mem::size_of, ptr::null_mut};
 use windows_sys::Win32::{
-    Foundation::{HWND, RECT},
+    Foundation::{HWND, POINT, RECT},
     Graphics::{
         Dwm::DwmFlush,
         Gdi::{
-            BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetDC,
-            ReleaseDC, SelectObject, BITMAPINFO, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
-            SRCCOPY,
+            BitBlt, ClientToScreen, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject,
+            GdiFlush, GetDC, ReleaseDC, SelectObject, BITMAPINFO, BI_RGB, DIB_RGB_COLORS, HBITMAP,
+            HDC, HGDIOBJ, SRCCOPY,
         },
     },
     UI::{
@@ -25,13 +25,25 @@ use windows_sys::Win32::{
             DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
         },
         WindowsAndMessaging::{
-            GetClientRect, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
+            GetAncestor, GetClientRect, GetForegroundWindow, GetWindowThreadProcessId, IsIconic,
+            IsWindowVisible, WindowFromPoint, GA_ROOT,
         },
     },
 };
 
 pub(super) fn capture(hwnd: usize) -> Result<ColorImage> {
+    capture_checked(hwnd, ensure_owned_visible_foreground)
+}
+
+/// Like [`capture`], for a window kept topmost instead of foreground: every
+/// sampled client point must belong to this window or its own children.
+pub(super) fn capture_unobscured(hwnd: usize) -> Result<ColorImage> {
+    capture_checked(hwnd, ensure_owned_visible_unobscured)
+}
+
+fn capture_checked(hwnd: usize, ensure_visible: fn(HWND) -> Result<()>) -> Result<ColorImage> {
     let hwnd = hwnd as HWND;
+    let ensure_owned_visible_foreground = ensure_visible;
     ensure_owned_visible_foreground(hwnd)?;
     // Client coordinates and the display DC must both use physical pixels even
     // when a test runner inherited a different thread DPI awareness context.
@@ -98,6 +110,48 @@ pub(super) fn capture(hwnd: usize) -> Result<ColorImage> {
         size: [width as usize, height as usize],
         pixels,
     })
+}
+
+fn ensure_owned_visible_unobscured(hwnd: HWND) -> Result<()> {
+    ensure!(!hwnd.is_null(), "未指定本程序窗口");
+    let mut owner = 0;
+    // SAFETY: Only the owning process id of the supplied HWND is written locally.
+    unsafe { GetWindowThreadProcessId(hwnd, &mut owner) };
+    ensure!(owner == std::process::id(), "只允许截取本程序拥有的窗口");
+    ensure!(
+        // SAFETY: These calls only inspect the verified owned window.
+        unsafe { IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 },
+        "本程序窗口尚未可见或已最小化"
+    );
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    ensure!(
+        // SAFETY: Reads our own window's client size into a local rectangle.
+        unsafe { GetClientRect(hwnd, &mut rect) } != 0,
+        "无法读取本程序客户区尺寸"
+    );
+    let (right, bottom) = (rect.right - 1, rect.bottom - 1);
+    for (x, y) in [
+        (0, 0),
+        (right, 0),
+        (0, bottom),
+        (right, bottom),
+        (right / 2, bottom / 2),
+    ] {
+        let mut point = POINT { x, y };
+        // SAFETY: Converts a local point using our own window; WindowFromPoint
+        // and GetAncestor only identify windows, they read no pixels or text.
+        let root = unsafe {
+            ClientToScreen(hwnd, &mut point);
+            GetAncestor(WindowFromPoint(point), GA_ROOT)
+        };
+        ensure!(root == hwnd, "真实显示检查需要本程序窗口未被遮挡");
+    }
+    Ok(())
 }
 
 fn ensure_owned_visible_foreground(hwnd: HWND) -> Result<()> {

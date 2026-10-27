@@ -13,7 +13,8 @@ use std::{
 
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
-pub const PROVIDERS: &[&str] = &["bing", "baidu", "tencent", "openai", "nvidia"];
+/// JSON Schema pattern for the `provider` argument and result.
+pub const PROVIDER_PATTERN: &str = "^(bing|baidu|tencent|model:[a-z0-9-]{1,32})$";
 
 pub(crate) fn validate_text(text: &str) -> Result<()> {
     ensure!(!text.trim().is_empty(), "Text must not be empty");
@@ -32,14 +33,29 @@ pub(crate) fn validate_language(language: &str, target: bool) -> Result<String> 
     Ok(language.to_owned())
 }
 
-pub(crate) fn validate_provider(provider: &str) -> Result<&'static str> {
+/// Map an MCP provider name to a saved selection. Model interfaces use their id:
+/// `model:{id}`. The former fixed names `openai`, `nvidia` and `generic` still work
+/// because migration keeps those ids.
+pub(crate) fn validate_provider(provider: &str) -> Result<String> {
     Ok(match provider {
-        "bing" => "Bing",
-        "baidu" => "Baidu",
-        "tencent" => "Tencent",
-        "openai" => "OpenAI",
-        "nvidia" => "Nvidia",
-        _ => bail!("Unsupported provider; choose bing, baidu, tencent, openai, or nvidia"),
+        "bing" => "Bing".into(),
+        "baidu" => "Baidu".into(),
+        "tencent" => "Tencent".into(),
+        "openai" | "nvidia" | "generic" => {
+            format!("{}{provider}", crate::config::MODEL_SELECTION_PREFIX)
+        }
+        _ => {
+            let id = provider
+                .strip_prefix("model:")
+                .filter(|id| {
+                    (1..=32).contains(&id.len())
+                        && id
+                            .bytes()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+                })
+                .context("Unsupported provider; choose bing, baidu, tencent, or model:<id>")?;
+            format!("{}{id}", crate::config::MODEL_SELECTION_PREFIX)
+        }
     })
 }
 
@@ -99,7 +115,7 @@ impl Headless {
         Ok(output)
     }
 
-    pub(crate) fn ocr(&mut self, path: &Path, table: bool) -> Result<Value> {
+    pub(crate) fn ocr(&mut self, path: &Path, table: bool, layout: bool) -> Result<Value> {
         let metadata = std::fs::metadata(path).context("Cannot open local image file")?;
         ensure!(
             metadata.is_file(),
@@ -111,6 +127,7 @@ impl Headless {
         );
         let config = Config {
             last_ocr_selection: if table { "默认_table" } else { "默认" }.into(),
+            layout_analysis: layout,
             ..Config::default()
         };
         let output = self.execute(
@@ -148,16 +165,24 @@ impl Headless {
             config.target_lang = target;
         }
         if let Some(provider) = provider {
-            config.last_translate_selection = provider.into();
+            config.last_translate_selection = provider;
         }
+        let requested = config.last_translate_selection.clone();
         config.normalize().context("Invalid translation settings")?;
+        // normalize() resets selections of missing interfaces; never fall back silently.
+        ensure!(
+            config.last_translate_selection == requested
+                || crate::config::model_translator(&requested).is_none(),
+            "The selected model interface does not exist or cannot translate; check SightOCR settings"
+        );
         let provider = match config.last_translate_selection.as_str() {
-            "默认" | "Bing" | "Edge" => "bing",
-            "Baidu" => "baidu",
-            "Tencent" => "tencent",
-            "OpenAI" => "openai",
-            "Nvidia" => "nvidia",
-            _ => bail!("Unsupported saved provider; set provider or update settings"),
+            "默认" | "Bing" | "Edge" => "bing".to_owned(),
+            "Baidu" => "baidu".into(),
+            "Tencent" => "tencent".into(),
+            selection => match crate::config::model_translator(selection) {
+                Some(id) => format!("model:{id}"),
+                None => bail!("Unsupported saved provider; set provider or update settings"),
+            },
         };
         let source = config.source_lang.clone();
         let target = config.target_lang.clone();
