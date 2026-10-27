@@ -17,8 +17,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+mod preflight;
 #[cfg(test)]
 mod tests;
+
+pub use preflight::check_installation_ready;
 
 const RELEASE_URL: &str = "https://api.github.com/repos/FueTsui/SightOCR/releases/latest";
 const MAX_METADATA_BYTES: u64 = 2 * 1024 * 1024;
@@ -66,10 +69,7 @@ impl PreparedUpdate {
     /// allow the caller to exit normally. It reports installation failures even
     /// after the original UI has exited, and restores the previous app on error.
     pub fn launch(self, install_dir: &Path, relaunch: bool) -> Result<()> {
-        ensure!(
-            install_dir.is_absolute() && install_dir.is_dir(),
-            "无法确定 SightOCR 的安装目录"
-        );
+        check_installation_ready(install_dir)?;
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -210,6 +210,40 @@ fn apply_manifest(
     }
 }
 
+/// Only read the bounded tail and the setup failure matching this exit code.
+/// Older Inno Setup logs and missing/unreadable logs retain the generic error.
+fn installer_failure(code: i32, log_path: &Path) -> anyhow::Error {
+    let reason = (|| -> std::io::Result<Option<String>> {
+        let mut file = File::open(log_path)?;
+        let length = file.metadata()?.len();
+        file.seek(SeekFrom::Start(length.saturating_sub(64 * 1024)))?;
+        let mut bytes = Vec::new();
+        file.take(64 * 1024).read_to_end(&mut bytes)?;
+        let marker = format!(" FAILED ({code}): ");
+        Ok(String::from_utf8_lossy(&bytes)
+            .lines()
+            .rev()
+            .find_map(|line| line.split_once(&marker).map(|(_, reason)| reason))
+            .map(|reason| {
+                reason
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(1024)
+                    .collect::<String>()
+            })
+            .filter(|reason| !reason.trim().is_empty()))
+    })()
+    .ok()
+    .flatten();
+    let detail = reason
+        .map(|reason| format!("\n{reason}"))
+        .unwrap_or_default();
+    anyhow!(
+        "安装程序未能完成更新（退出码 {code}）{detail}\n日志：{}",
+        log_path.display()
+    )
+}
+
 /// Internal entry point for the temporary update supervisor. Call before normal
 /// argument parsing/single-instance acquisition, and display any returned error.
 /// This never downloads anything: it revalidates the staged package, waits for
@@ -253,11 +287,9 @@ pub fn apply_update(manifest_path: &Path) -> Result<()> {
                     }
                     Err(error) => return Err(anyhow!("无法运行更新安装程序：{error}")),
                 };
-                ensure!(
-                    code == 0,
-                    "安装程序未能完成更新（退出码 {code}）。日志：{}",
-                    log_path.display()
-                );
+                if code != 0 {
+                    return Err(installer_failure(code, &log_path));
+                }
                 Ok(code)
             },
             |directory| {

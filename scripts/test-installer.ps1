@@ -55,15 +55,28 @@ function Invoke-Program([string]$File, [string[]]$Arguments, [int]$TimeoutSecond
     return $process.ExitCode
 }
 
+function Assert-TestRoot {
+    $resolvedRoot = [IO.Path]::GetFullPath($root)
+    $targetPrefix = [IO.Path]::GetFullPath((Join-Path $projectRoot 'target')).TrimEnd('\') + '\'
+    if (-not $resolvedRoot.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($resolvedRoot) -ne 'root' -or
+        [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($resolvedRoot)) -notmatch '^setup-test-[0-9a-f]{8}$') {
+        throw "Refusing operation outside the isolated installer test root: $resolvedRoot"
+    }
+    return $resolvedRoot
+}
+
 function Stop-TestPrograms {
-    Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) } |
+    $testPrefix = (Assert-TestRoot).TrimEnd('\') + '\'
+    Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($testPrefix, [StringComparison]::OrdinalIgnoreCase) } |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 300
 }
 
 function Reset-State {
+    $resolvedRoot = Assert-TestRoot
     Stop-TestPrograms
-    if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    if (Test-Path -LiteralPath $resolvedRoot) { Remove-Item -LiteralPath $resolvedRoot -Recurse -Force }
     if (Test-Path -LiteralPath $regBase) { Remove-Item -LiteralPath $regBase -Recurse -Force }
     New-Item -ItemType Directory -Path $root | Out-Null
 }
@@ -178,7 +191,7 @@ try {
     New-Item -Path $runKey -Force | Out-Null
     New-ItemProperty -Path $runKey -Name 'SightOCR' -Value "`"$programDir\SightOCR.exe`" --silent" | Out-Null
     New-Shortcut (Join-Path $root 'StartMenu\SightOCR.lnk') "$programDir\SightOCR.exe"
-    $app = Start-Process -FilePath (Join-Path $programDir 'SightOCR.exe') -PassThru
+    $app = Start-Process -FilePath (Join-Path $programDir 'SightOCR.exe') -WindowStyle Hidden -PassThru
     Assert (Wait-Until { (Get-Started $programDir) -eq 1 }) 'old SightOCR running'
     $stage = Join-Path $work 'SightOCR-update-test'
     New-Item -ItemType Directory -Path $stage | Out-Null
@@ -220,7 +233,7 @@ try {
 
     Write-Host "`n[3] In-app update refuses while the MCP server runs"
     $readme = (Get-FileHash (Join-Path $programDir 'README.md')).Hash
-    $mcp = Start-Process -FilePath (Join-Path $programDir 'sightocr-mcp.exe') -PassThru
+    $mcp = Start-Process -FilePath (Join-Path $programDir 'sightocr-mcp.exe') -WindowStyle Hidden -PassThru
     Start-Sleep -Milliseconds 800
     $code = Invoke-Program $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/UPDATE', "/DIR=$programDir", "/LOG=$work\3.log")
     Stop-Process -Id $mcp.Id -Force -ErrorAction SilentlyContinue

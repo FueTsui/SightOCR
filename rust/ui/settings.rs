@@ -1212,6 +1212,13 @@ impl App {
                         .size(13.0)
                         .color(p.text),
                 );
+                if self.update.failed {
+                    ui.label(
+                        RichText::new(&self.update.message)
+                            .size(13.0)
+                            .color(message_color),
+                    );
+                }
                 ui.horizontal(|ui| {
                     let idle = !self.busy;
                     let response = ui

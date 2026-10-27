@@ -322,8 +322,10 @@ pub fn package_files(source: &Path) -> Result<Vec<String>> {
         }
         Ok(())
     }
-    if source.join("skills").is_dir() {
-        walk(source, &source.join("skills"), &mut files)?;
+    for directory in ["skills", "assets", "docs/screenshots"] {
+        if source.join(directory).is_dir() {
+            walk(source, &source.join(directory), &mut files)?;
+        }
     }
     for path in &files {
         relative_path(path)?;
@@ -413,6 +415,11 @@ mod tests {
         std::fs::write(dir.path().join("docs/notes.txt"), "not packaged").unwrap();
         std::fs::create_dir_all(dir.path().join("skills/sightocr")).unwrap();
         std::fs::write(dir.path().join("skills/sightocr/SKILL.md"), "skill").unwrap();
+        for path in ["assets/icon.png", "docs/screenshots/9.9.9/result.png"] {
+            let target = dir.path().join(path);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(target, path.repeat(500)).unwrap();
+        }
         dir
     }
 
@@ -437,6 +444,8 @@ mod tests {
             .map(|e| e.path.as_str())
             .collect();
         assert!(paths.contains(&"docs/USAGE.md") && paths.contains(&"skills/sightocr/SKILL.md"));
+        assert!(paths.contains(&"assets/icon.png"));
+        assert!(paths.contains(&"docs/screenshots/9.9.9/result.png"));
         assert!(!paths.contains(&"docs/notes.txt"));
         package.verify(&mut |_, _| {}).unwrap();
         for entry in &package.index.files {

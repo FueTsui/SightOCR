@@ -292,7 +292,15 @@ impl App {
 
     /// Close SightOCR, install the verified update, and start it again.
     pub(super) fn install_update_now(&mut self, ctx: &egui::Context) {
-        if self.busy {
+        if self.busy || self.update.ready.is_none() {
+            return;
+        }
+        // Keep the verified download available when a connected MCP client is
+        // still using this installation; do not exit just to discover that.
+        if let Err(error) = update_install_directory()
+            .and_then(|directory| updater::check_installation_ready(&directory))
+        {
+            self.update.fail(format!("{error:#}。已下载的更新包已保留"));
             return;
         }
         let Some(update) = self.update.ready.take() else {
@@ -310,9 +318,7 @@ impl App {
 
     fn launch_update(&mut self, update: PreparedUpdate, relaunch: bool) -> Result<()> {
         self.config.save(&self.path).context("无法保存当前配置")?;
-        let executable = std::env::current_exe().context("无法确定安装位置")?;
-        let directory = executable.parent().context("无法确定安装目录")?;
-        update.launch(directory, relaunch)
+        update.launch(&update_install_directory()?, relaunch)
     }
 
     pub(super) fn request_exit(&mut self, ctx: &egui::Context, restart: bool) {
@@ -320,8 +326,11 @@ impl App {
         if !restart && self.update.install_on_exit {
             if let Some(update) = self.update.ready.take() {
                 if let Err(error) = self.launch_update(update, false) {
-                    // The app is closing; there is nowhere left to show this.
-                    eprintln!("SightOCR update was not started: {error:#}");
+                    // A release build has no console. Explain the skipped
+                    // update before honoring the user's request to exit.
+                    crate::show_error(&format!(
+                        "自动更新未开始：{error:#}\n关闭此提示后将退出 SightOCR，更新尚未安装。"
+                    ));
                 }
             }
         }
@@ -353,6 +362,14 @@ impl App {
         }
         let _ = self.config.save(&self.path);
     }
+}
+
+fn update_install_directory() -> Result<std::path::PathBuf> {
+    let executable = std::env::current_exe().context("无法确定安装位置")?;
+    executable
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .context("无法确定安装目录")
 }
 
 #[cfg(test)]

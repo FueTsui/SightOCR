@@ -47,6 +47,20 @@ $readme = [IO.File]::ReadAllLines((Join-Path $projectRoot 'README.md'), [Text.UT
     -not ($links | Where-Object { $shippedDocs -notcontains $_.Groups[1].Value })
 }
 [IO.File]::WriteAllLines((Join-Path $stagingRoot 'README.md'), [string[]]$readme, [Text.UTF8Encoding]::new($false))
+# Preserve the local images referenced by the shipped README in both packages.
+$imagePrefix = [IO.Path]::GetFullPath($projectRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+$readmeImages = [regex]::Matches(($readme -join "`n"), '<img\s+[^>]*src="([^"]+)"')
+foreach ($imageMatch in $readmeImages) {
+    $relativeImage = $imageMatch.Groups[1].Value
+    $sourceImage = [IO.Path]::GetFullPath((Join-Path $projectRoot $relativeImage))
+    if (-not $sourceImage.StartsWith($imagePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        $relativeImage -notmatch '^(assets/|docs/screenshots/)' -or $relativeImage -match '(^|/)\.\.(/|$)') {
+        throw "README image is outside the supported package folders: $relativeImage"
+    }
+    $destinationImage = Join-Path $stagingRoot $relativeImage
+    New-Item -ItemType Directory -Path (Split-Path -Parent $destinationImage) -Force | Out-Null
+    Copy-Item -LiteralPath $sourceImage -Destination $destinationImage
+}
 # Preserve existing packages outside the publish directory rather than carrying
 # stale Python bundles, user configuration or logs into the new package.
 function Assert-WorkspacePath([string]$Candidate) {
