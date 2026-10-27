@@ -5,17 +5,24 @@ use super::BoundingBox;
 use anyhow::{ensure, Result};
 use image::RgbaImage;
 
+mod keystone;
 mod rules;
+#[cfg(all(test, feature = "private-table-samples"))]
+mod samples;
+mod skew;
 use rules::{Rule, RuleSet};
+#[cfg(test)]
+pub(super) use skew::Quad;
+pub(super) use skew::{level_boxes, straighten};
 
 const MAX_TABLE_CELLS: usize = 262_144;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Rect {
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
+    pub(super) left: f32,
+    pub(super) top: f32,
+    pub(super) right: f32,
+    pub(super) bottom: f32,
 }
 
 impl Rect {
@@ -52,10 +59,15 @@ pub(super) struct TextLine {
 }
 
 pub(super) fn reconstruct(lines: &[TextLine], image: &RgbaImage) -> String {
+    reconstruct_pass(lines, image, true)
+}
+
+fn reconstruct_pass(lines: &[TextLine], image: &RgbaImage, correct_keystone: bool) -> String {
     let mut ordered: Vec<_> = lines
         .iter()
         .filter(|line| !line.text.trim().is_empty())
         .collect();
+    drop_duplicate_lines(&mut ordered);
     if ordered.is_empty() {
         return String::new();
     }
@@ -87,15 +99,49 @@ pub(super) fn reconstruct(lines: &[TextLine], image: &RgbaImage) -> String {
             .fold(f32::NEG_INFINITY, f32::max),
     };
     let mut rules = rules::detect(image, &ordered, bounds, height);
-    if let Some(frame) = enclosing_frame(&rules, bounds) {
-        // A page number outside a closed table is not an extra data row.
-        ordered.retain(|line| {
-            let x = (line.rect.left + line.rect.right) / 2.0;
-            x >= frame.left
-                && x <= frame.right
-                && line.rect.center_y() >= frame.top
-                && line.rect.center_y() <= frame.bottom
-        });
+    // A table photographed at an angle has leaning side borders; make them
+    // vertical first, then measure everything again.
+    if correct_keystone {
+        if let Some(keystone) = keystone::Keystone::measure(&rules, height) {
+            let corrected: Vec<TextLine> = lines.iter().map(|line| keystone.line(line)).collect();
+            return reconstruct_pass(&corrected, &keystone.apply(image), false);
+        }
+    }
+    let mut above = Vec::new();
+    let mut below = Vec::new();
+    let diagonal_header;
+    if let Some(frame) = enclosing_frame(&rules, bounds, &ordered, height) {
+        // A diagonally split corner cell (斜线表头) holds scattered labels whose
+        // gaps must not become columns: read them as one cell.
+        if let Some(header) = diagonal_header_cell(image, &rules, frame, &ordered, height) {
+            ordered.retain(|line| {
+                !header
+                    .pieces
+                    .iter()
+                    .any(|piece| std::ptr::eq(*piece, *line))
+            });
+            diagonal_header = header.line;
+            ordered.push(&diagonal_header);
+            ordered.sort_by(|a, b| {
+                a.rect
+                    .center_y()
+                    .total_cmp(&b.rect.center_y())
+                    .then(a.rect.left.total_cmp(&b.rect.left))
+            });
+        }
+        // Titles above and notes below a closed table become their own lines
+        // instead of joining its first or last row; a page number is dropped.
+        for &line in &ordered {
+            if inside(frame, line) || is_page_number(&line.text) {
+                continue;
+            }
+            if line.rect.center_y() < frame.top {
+                above.push(line);
+            } else if line.rect.center_y() > frame.bottom {
+                below.push(line);
+            }
+        }
+        ordered.retain(|line| inside(frame, line));
         if ordered.is_empty() {
             return String::new();
         }
@@ -107,17 +153,24 @@ pub(super) fn reconstruct(lines: &[TextLine], image: &RgbaImage) -> String {
             .iter()
             .map(|line| line.rect.bottom)
             .fold(f32::NEG_INFINITY, f32::max);
+        // The frame's own sides are borders, not column separators, even when
+        // text in a skewed photo pokes past them.
+        let margin = (height * 0.3).max(3.0) + 3.0;
+        bounds.left = bounds.left.max(frame.left + margin);
+        bounds.right = bounds.right.min(frame.right - margin);
     }
     let text_rows = group_text_rows(&ordered, height);
+    let column_rows = with_vertical_labels(&text_rows, height);
     let physical_columns = positions(&rules.vertical, bounds.left, bounds.right);
     // Infer missing separators even when some physical borders were found.
     // Use text baselines here; sorting a multiline cell by x creates false gaps.
-    let mut columns = infer_columns(&text_rows, height, &physical_columns);
+    let mut columns = infer_columns(&column_rows, height, &physical_columns);
+    vertical_label_columns(&ordered, &mut columns, height);
     let mut cuts = row_boundaries(&ordered, &columns, &rules, bounds, height);
     if (cuts.len() + 1).saturating_mul(columns.len() + 1) > MAX_TABLE_CELLS {
         // A textured image can generate thousands of plausible rules. Fall
         // back to the at-most-1000 OCR lines before allocating a dense grid.
-        columns = infer_columns(&text_rows, height, &[]);
+        columns = infer_columns(&column_rows, height, &[]);
         cuts = text_boundaries(&text_rows);
         rules = RuleSet::default();
     }
@@ -144,28 +197,302 @@ pub(super) fn reconstruct(lines: &[TextLine], image: &RgbaImage) -> String {
         while col > 0 && !active_columns[row][col - 1] {
             col -= 1;
         }
-        let cell = &mut grid[row][col];
-        if !cell.is_empty() {
-            cell.push(' ');
-        }
-        // Embedded tabs/newlines must not manufacture extra TSV cells.
-        cell.push_str(&line.text.split_whitespace().collect::<Vec<_>>().join(" "));
+        // Embedded tabs/newlines must not manufacture extra TSV cells, and wrapped
+        // Chinese/Japanese lines must not gain a space at the wrap.
+        super::text::push_wrapped(&mut grid[row][col], &super::text::tidy_line(&line.text));
     }
     // Preserve empty interior columns indicated by physical borders. Removing
     // them shifts every following value left when pasted into a spreadsheet.
     let populated: Vec<_> = (0..columns.len() + 1)
         .filter(|&c| grid.iter().any(|r| !r[c].is_empty()))
         .collect();
-    grid.iter()
+    let table = grid
+        .iter()
         .filter(|row| row.iter().any(|cell| !cell.is_empty()))
         .map(|row| {
             (*populated.first().unwrap()..=*populated.last().unwrap())
                 .map(|c| row[c].as_str())
                 .collect::<Vec<_>>()
                 .join("\t")
-        })
+        });
+    outside_rows(&above, height)
+        .into_iter()
+        .chain(table)
+        .chain(outside_rows(&below, height))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+struct DiagonalHeader<'a> {
+    pieces: Vec<&'a TextLine>,
+    line: TextLine,
+}
+
+/// The table's top-left cell, when a diagonal stroke starts at its top-left
+/// corner and it holds several labels. Labels are grouped by their side of the
+/// diagonal(s) and read top-right to bottom-left: `星期/科目/时间`.
+fn diagonal_header_cell<'a>(
+    image: &RgbaImage,
+    rules: &RuleSet,
+    frame: Rect,
+    lines: &[&'a TextLine],
+    height: f32,
+) -> Option<DiagonalHeader<'a>> {
+    let tolerance = (height * 0.5).max(4.0);
+    let (x0, y0) = (frame.left + 3.0, frame.top + 3.0);
+    let y1 = rules
+        .horizontal
+        .iter()
+        .filter(|rule| rule.position > y0 + height * 1.5 && rule.start <= x0 + tolerance)
+        .map(|rule| rule.position)
+        .fold(f32::INFINITY, f32::min);
+    let x1 = rules
+        .vertical
+        .iter()
+        .filter(|rule| {
+            rule.position > x0 + height * 1.5
+                && rule.start <= y0 + tolerance
+                && rule.end >= y1 - tolerance
+        })
+        .map(|rule| rule.position)
+        .fold(f32::INFINITY, f32::min);
+    if !x1.is_finite() || !y1.is_finite() || x1 - x0 > (frame.right - frame.left) * 0.5 {
+        return None;
+    }
+    let cell = Rect {
+        left: x0,
+        top: y0,
+        right: x1,
+        bottom: y1,
+    };
+    let pieces: Vec<&TextLine> = lines
+        .iter()
+        .copied()
+        .filter(|line| {
+            let (x, y) = (
+                (line.rect.left + line.rect.right) / 2.0,
+                line.rect.center_y(),
+            );
+            x > cell.left && x < cell.right && y > cell.top && y < cell.bottom
+        })
+        .collect();
+    if pieces.is_empty()
+        || !(has_corner_diagonal(image, cell) || diagonal_layout(&pieces, cell, height))
+    {
+        return None;
+    }
+    let (width, depth) = (cell.right - cell.left, cell.bottom - cell.top);
+    // u/v: position in the cell; side: offset across the diagonal; along: progress.
+    let mut placed: Vec<(f32, f32, &TextLine)> = pieces
+        .iter()
+        .map(|line| {
+            let u = ((line.rect.left + line.rect.right) / 2.0 - cell.left) / width;
+            let v = (line.rect.center_y() - cell.top) / depth;
+            (u - v, u + v, *line)
+        })
+        .collect();
+    placed.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut groups: Vec<Vec<(f32, f32, &TextLine)>> = Vec::new();
+    for item in placed {
+        match groups.last_mut() {
+            Some(group) if group.last().unwrap().0 - item.0 < 0.3 => group.push(item),
+            _ => groups.push(vec![item]),
+        }
+    }
+    let text = groups
+        .into_iter()
+        .map(|mut group| {
+            group.sort_by(|a, b| a.1.total_cmp(&b.1));
+            group
+                .iter()
+                .map(|(_, _, line)| super::text::tidy_line(&line.text))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    // Anchor the merged label at the cell's left edge: when only a right-hand
+    // label was recognized it still belongs to the corner cell's column.
+    let union = pieces.iter().fold(pieces[0].rect, |acc, line| Rect {
+        left: acc.left.min(line.rect.left).min(cell.left + 1.0),
+        top: acc.top.min(line.rect.top),
+        right: acc.right.max(line.rect.right),
+        bottom: acc.bottom.max(line.rect.bottom),
+    });
+    Some(DiagonalHeader {
+        pieces,
+        line: TextLine { text, rect: union },
+    })
+}
+
+/// Labels laid out like a diagonal header even when its faint strokes are lost
+/// (blur, low contrast): several labels in at least two lines, the upper line
+/// reaching the right part of the cell and the lower line the left part. A
+/// wrapped, centred label stacks its lines and does not qualify.
+fn diagonal_layout(pieces: &[&TextLine], cell: Rect, height: f32) -> bool {
+    if pieces.len() < 3 {
+        return false;
+    }
+    let mut ordered = pieces.to_vec();
+    ordered.sort_by(|a, b| a.rect.center_y().total_cmp(&b.rect.center_y()));
+    let rows = group_text_rows(&ordered, height);
+    let center = |line: &&TextLine| (line.rect.left + line.rect.right) / 2.0;
+    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+        return false;
+    };
+    let upper = first.iter().map(center).fold(f32::NEG_INFINITY, f32::max);
+    let lower = last.iter().map(center).fold(f32::INFINITY, f32::min);
+    let width = cell.right - cell.left;
+    rows.len() >= 2
+        && upper - lower > width * 0.25
+        && upper > cell.left + width * 0.5
+        && lower < cell.left + width * 0.5
+}
+
+/// A dark stroke into the cell's top-left or bottom-right corner from one of the
+/// opposite edges. Printed and photographed tables use both forms.
+fn has_corner_diagonal(image: &RgbaImage, cell: Rect) -> bool {
+    let luma = |x: f32, y: f32| -> Option<u8> {
+        let (x, y) = (x.round(), y.round());
+        if x < 0.0 || y < 0.0 || x >= image.width() as f32 || y >= image.height() as f32 {
+            return None;
+        }
+        let p = image.get_pixel(x as u32, y as u32);
+        Some(((u32::from(p[0]) * 77 + u32::from(p[1]) * 150 + u32::from(p[2]) * 29) / 256) as u8)
+    };
+    let mut background = Vec::new();
+    for i in 1..20 {
+        for j in 1..20 {
+            let x = cell.left + (cell.right - cell.left) * i as f32 / 20.0;
+            let y = cell.top + (cell.bottom - cell.top) * j as f32 / 20.0;
+            background.extend(luma(x, y));
+        }
+    }
+    if background.is_empty() {
+        return false;
+    }
+    background.sort_unstable();
+    let paper = background[background.len() / 2];
+    // A stroke pixel is clearly darker than the paper, or (faint photographed
+    // pencil-like lines) darker than the paper a few pixels above and below it.
+    let dark = |x: f32, y: f32| {
+        let core = (-1..=1)
+            .flat_map(|dx| (-1..=1).map(move |dy| (dx, dy)))
+            .filter_map(|(dx, dy)| luma(x + dx as f32, y + dy as f32))
+            .min();
+        let sides = [luma(x, y - 6.0), luma(x, y + 6.0)]
+            .into_iter()
+            .flatten()
+            .min();
+        core.is_some_and(|core| {
+            u16::from(core) + 30 < u16::from(paper)
+                || sides.is_some_and(|sides| u16::from(core) + 10 < u16::from(sides))
+        })
+    };
+    let (width, depth) = (cell.right - cell.left, cell.bottom - cell.top);
+    let stroke = |(sx, sy): (f32, f32), (ex, ey): (f32, f32)| {
+        (2..=18)
+            .filter(|&i| {
+                let t = i as f32 / 20.0;
+                dark(sx + (ex - sx) * t, sy + (ey - sy) * t)
+            })
+            .count()
+            >= 13
+    };
+    // Photographed lines may meet slightly inside the corner.
+    let near = |(x, y): (f32, f32), sx: f32, sy: f32| {
+        [(0.0, 0.0), (0.0, 0.12), (0.06, 0.0), (0.06, 0.12)]
+            .map(|(fx, fy)| (x + sx * width * fx, y + sy * depth * fy))
+    };
+    (2..=8).map(|t| t as f32 / 10.0).any(|t| {
+        near((cell.left, cell.top), 1.0, 1.0)
+            .into_iter()
+            .any(|corner| {
+                stroke(corner, (cell.right, cell.top + depth * t))
+                    || stroke(corner, (cell.left + width * t, cell.bottom))
+            })
+            || near((cell.right, cell.bottom), -1.0, -1.0)
+                .into_iter()
+                .any(|corner| {
+                    stroke((cell.left, cell.top + depth * t), corner)
+                        || stroke((cell.left + width * t, cell.top), corner)
+                })
+    })
+}
+
+fn inside(frame: Rect, line: &TextLine) -> bool {
+    let x = (line.rect.left + line.rect.right) / 2.0;
+    x >= frame.left
+        && x <= frame.right
+        && line.rect.center_y() >= frame.top
+        && line.rect.center_y() <= frame.bottom
+}
+
+/// `1`, `- 2 -`, `第 3 页`, `Page 4` and similar page labels.
+fn is_page_number(text: &str) -> bool {
+    let mut rest: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    for noise in ["Page", "page", "第", "页", "頁", "-", "—", "–"] {
+        rest = rest.replace(noise, "");
+    }
+    !rest.is_empty() && rest.len() <= 4 && rest.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Text outside a framed table: one line per visual row, in reading order.
+fn outside_rows(lines: &[&TextLine], height: f32) -> Vec<String> {
+    let mut ordered = lines.to_vec();
+    ordered.sort_by(|a, b| a.rect.center_y().total_cmp(&b.rect.center_y()));
+    group_text_rows(&ordered, height)
+        .into_iter()
+        .map(|row| {
+            let mut text = String::new();
+            let mut previous: Option<&TextLine> = None;
+            for line in row {
+                let fragment = super::text::tidy_line(&line.text);
+                // Letter-spaced titles ("课  程  表") are one word; other wide
+                // gaps separate distinct items such as a school and a class.
+                let spaced_title = previous.is_some_and(|before| {
+                    before.text.chars().count() <= 2 && fragment.chars().count() <= 2
+                });
+                let far = previous
+                    .is_some_and(|before| line.rect.left - before.rect.right > height * 1.5);
+                if far && !spaced_title && !text.is_empty() {
+                    text.push(' ');
+                    text.push_str(&fragment);
+                } else {
+                    super::text::push_wrapped(&mut text, &fragment);
+                }
+                previous = Some(line);
+            }
+            text
+        })
+        .filter(|text| !text.is_empty())
+        .collect()
+}
+
+/// OneOCR occasionally reports a fragment again inside a longer line (`下` within
+/// `下午`). Keep only the longer reading.
+fn drop_duplicate_lines(lines: &mut Vec<&TextLine>) {
+    let area = |r: Rect| (r.right - r.left).max(0.0) * (r.bottom - r.top).max(0.0);
+    let compact = |text: &str| {
+        text.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    let snapshot = lines.clone();
+    lines.retain(|line| {
+        let own = area(line.rect);
+        let text = compact(&line.text);
+        !snapshot.iter().any(|other| {
+            if std::ptr::eq(*other, *line) || area(other.rect) <= own {
+                return false;
+            }
+            let overlap = (line.rect.right.min(other.rect.right)
+                - line.rect.left.max(other.rect.left))
+            .max(0.0)
+                * (line.rect.bottom.min(other.rect.bottom) - line.rect.top.max(other.rect.top))
+                    .max(0.0);
+            own > 0.0 && overlap >= own * 0.8 && compact(&other.text).contains(&text)
+        })
+    });
 }
 
 #[derive(Clone, Copy)]
@@ -174,7 +501,15 @@ struct RowBoundary {
     inferred: bool,
 }
 
-fn enclosing_frame(rules: &RuleSet, bounds: Rect) -> Option<Rect> {
+/// A closed outer border: the outermost wide rules joined by full-height sides.
+/// Text outside it (titles, notes) may be taller than the table itself, so the
+/// frame is judged by how much text it encloses, not by its share of the height.
+fn enclosing_frame(
+    rules: &RuleSet,
+    bounds: Rect,
+    lines: &[&TextLine],
+    height: f32,
+) -> Option<Rect> {
     let wide: Vec<_> = rules
         .horizontal
         .iter()
@@ -182,26 +517,58 @@ fn enclosing_frame(rules: &RuleSet, bounds: Rect) -> Option<Rect> {
         .collect();
     let first = wide.first()?;
     let last = wide.last()?;
-    if last.position - first.position < bounds.height() * 0.7 {
+    if last.position - first.position < height * 3.0 {
         return None;
     }
     let left = first.start.max(last.start);
     let right = first.end.min(last.end);
-    for x in [left, right] {
-        if !rules.vertical.iter().any(|rule| {
-            (rule.position - x).abs() <= 4.0
-                && rule.start <= first.position + 4.0
-                && rule.end >= last.position - 4.0
-        }) {
-            return None;
-        }
+    let tolerance = (height * 0.5).max(4.0);
+    let sides = [left, right]
+        .into_iter()
+        .filter(|&x| {
+            rules.vertical.iter().any(|rule| {
+                (rule.position - x).abs() <= tolerance
+                    && rule.start <= first.position + tolerance
+                    && rule.end >= last.position - tolerance
+            })
+        })
+        .count();
+    // A blurred photo can lose both faint outer sides. Interior column rules
+    // that run exactly from the top border to the bottom one, and none that
+    // continue past them, still close the table.
+    let spanning = rules
+        .vertical
+        .iter()
+        .filter(|rule| {
+            (rule.start - first.position).abs() <= tolerance
+                && (rule.end - last.position).abs() <= tolerance
+        })
+        .count();
+    let escapes = rules.vertical.iter().any(|rule| {
+        rule.start < first.position - tolerance * 2.0 || rule.end > last.position + tolerance * 2.0
+    });
+    if sides == 0 && (spanning < 2 || escapes) {
+        return None;
     }
-    Some(Rect {
+    let frame = Rect {
         left: left - 3.0,
         right: right + 3.0,
         top: first.position - 3.0,
         bottom: last.position + 3.0,
-    })
+    };
+    // Text beside the frame, within its height, means the measured sides are
+    // not the outer border (a logo block can cut a border short at small sizes).
+    if lines.iter().any(|line| {
+        let x = (line.rect.left + line.rect.right) / 2.0;
+        let y = line.rect.center_y();
+        y > frame.top && y < frame.bottom && (x < frame.left || x > frame.right)
+    }) {
+        return None;
+    }
+    // A photo can lose one tilted side; then nearly all text must lie inside.
+    let enclosed = lines.iter().filter(|line| inside(frame, line)).count() as f32;
+    let needed = if sides == 2 { 0.5 } else { 0.75 };
+    (enclosed >= lines.len() as f32 * needed).then_some(frame)
 }
 
 fn positions(rules: &[Rule], start: f32, end: f32) -> Vec<f32> {
@@ -267,6 +634,8 @@ fn row_boundaries(
         .flat_map(|rule| [rule.start, rule.end])
         .collect();
     endpoints.sort_by(f32::total_cmp);
+    // A box that only grazes the boundary (loose OCR padding) does not cross it.
+    let graze = height * 0.25;
     let mut index = 0;
     while index < endpoints.len() {
         let start = index;
@@ -282,7 +651,7 @@ fn row_boundaries(
                 .any(|cut| (cut.position - position).abs() <= 3.0)
             && !lines
                 .iter()
-                .any(|line| position > line.rect.top && position < line.rect.bottom)
+                .any(|line| position > line.rect.top + graze && position < line.rect.bottom - graze)
         {
             cuts.push(RowBoundary {
                 position,
@@ -380,6 +749,99 @@ fn column_activity(
         .collect()
 }
 
+/// A vertical label (`上午` spanning several rows) beside a column of short
+/// entries (period numbers) shares no text row with most of them, so row gaps
+/// barely support the boundary between them, and in a blurred photo its faint
+/// rule may be lost. A clear vertical strip from the label to the entries, which
+/// no text over the same rows crosses, is that boundary.
+fn vertical_label_columns(lines: &[&TextLine], columns: &mut Vec<f32>, height: f32) {
+    let labels: Vec<&TextLine> = lines
+        .iter()
+        .copied()
+        .filter(|line| {
+            line.rect.height() > height * 2.5
+                && line.rect.height() > (line.rect.right - line.rect.left) * 1.5
+        })
+        .collect();
+    for label in labels {
+        let edge = label.rect.right;
+        let section_end = columns
+            .iter()
+            .copied()
+            .find(|&x| x > edge - height * 0.3)
+            .unwrap_or(f32::INFINITY);
+        // Already separated by a rule or an inferred boundary near the label.
+        let entries: Vec<&TextLine> = lines
+            .iter()
+            .copied()
+            .filter(|line| {
+                line.rect.left >= edge + height * 0.3
+                    && line.rect.right <= section_end
+                    && line.rect.height() <= height * 2.5
+            })
+            .collect();
+        if entries.len() < 2 {
+            continue;
+        }
+        let next = entries
+            .iter()
+            .map(|line| line.rect.left)
+            .fold(f32::INFINITY, f32::min);
+        if next - edge < height * 0.7 || section_end < next {
+            continue;
+        }
+        let top = entries
+            .iter()
+            .map(|line| line.rect.top)
+            .fold(label.rect.top, f32::min);
+        let bottom = entries
+            .iter()
+            .map(|line| line.rect.bottom)
+            .fold(label.rect.bottom, f32::max);
+        let strip = (edge + height * 0.1, next - height * 0.1);
+        let crossed = lines.iter().any(|line| {
+            let y = line.rect.center_y();
+            y > top && y < bottom && line.rect.left < strip.1 && line.rect.right > strip.0
+        });
+        if !crossed {
+            columns.push((edge + next) / 2.0);
+            columns.sort_by(f32::total_cmp);
+        }
+    }
+}
+
+/// Column evidence only: a vertical label (`上午` written top to bottom) sits in a
+/// single text row, yet it separates every row it spans from the next column.
+fn with_vertical_labels<'a>(rows: &[Vec<&'a TextLine>], height: f32) -> Vec<Vec<&'a TextLine>> {
+    let tall: Vec<&TextLine> = rows
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|line| {
+            line.rect.height() > height * 2.5
+                && line.rect.height() > (line.rect.right - line.rect.left) * 1.5
+        })
+        .collect();
+    rows.iter()
+        .map(|row| {
+            let mut row = row.clone();
+            let middle =
+                row.iter().map(|line| line.rect.center_y()).sum::<f32>() / row.len() as f32;
+            for &label in &tall {
+                let beside = !row.iter().any(|line| {
+                    std::ptr::eq(*line, label)
+                        || (line.rect.left < label.rect.right && label.rect.left < line.rect.right)
+                });
+                if beside && middle > label.rect.top && middle < label.rect.bottom {
+                    row.push(label);
+                }
+            }
+            row.sort_by(|a, b| a.rect.left.total_cmp(&b.rect.left));
+            row
+        })
+        .collect()
+}
+
 fn group_text_rows<'a>(ordered: &[&'a TextLine], height: f32) -> Vec<Vec<&'a TextLine>> {
     let mut rows: Vec<Vec<&TextLine>> = Vec::new();
     for &line in ordered {
@@ -413,11 +875,18 @@ fn split_incomplete_row_bands<'a>(
     if columns.is_empty() {
         return rows;
     }
-    let typical_band = horizontal
+    // The median ruled row, not the smallest: one short heading row must not
+    // make every ordinary two-line row look like several missing rows.
+    let mut bands: Vec<f32> = horizontal
         .windows(2)
         .map(|pair| pair[1] - pair[0])
         .filter(|&gap| gap >= height * 1.5)
-        .fold(f32::INFINITY, f32::min);
+        .collect();
+    bands.sort_by(f32::total_cmp);
+    let typical_band = bands
+        .get(bands.len().saturating_sub(1) / 2)
+        .copied()
+        .unwrap_or(f32::INFINITY);
     let mut result = Vec::new();
     for row in rows {
         let groups = group_text_rows(&row, height);
@@ -484,7 +953,14 @@ fn infer_columns(rows: &[Vec<&TextLine>], height: f32, physical: &[f32]) -> Vec<
     }
     // Wide spaces between group headings already separated by a real rule
     // cannot establish a threshold for the missing columns inside each group.
-    gaps.retain(|gap| !physical.iter().any(|&x| gap.left <= x && x <= gap.right));
+    // Text can touch a ruled border; a gap starting right beside a rule is still
+    // that rule's gap, not evidence for another column a few pixels away.
+    let touching = height * 0.3;
+    gaps.retain(|gap| {
+        !physical
+            .iter()
+            .any(|&x| gap.left - touching <= x && x <= gap.right + touching)
+    });
     let sizes = gaps.iter().map(|gap| gap.right - gap.left).collect();
     let threshold = gap_threshold(sizes, height);
     gaps.retain(|gap| gap.right - gap.left >= threshold);
@@ -536,6 +1012,44 @@ fn gap_threshold(mut sizes: Vec<f32>, height: f32) -> f32 {
 }
 
 #[cfg(test)]
+pub(super) fn debug_rules(lines: &[TextLine], image: &RgbaImage) {
+    let ordered: Vec<_> = lines.iter().collect();
+    if ordered.is_empty() {
+        return;
+    }
+    let mut heights: Vec<_> = ordered.iter().map(|line| line.rect.height()).collect();
+    heights.sort_by(f32::total_cmp);
+    let height = heights[heights.len() / 2];
+    let bounds = Rect {
+        left: ordered
+            .iter()
+            .map(|l| l.rect.left)
+            .fold(f32::INFINITY, f32::min),
+        top: ordered
+            .iter()
+            .map(|l| l.rect.top)
+            .fold(f32::INFINITY, f32::min),
+        right: ordered
+            .iter()
+            .map(|l| l.rect.right)
+            .fold(f32::NEG_INFINITY, f32::max),
+        bottom: ordered
+            .iter()
+            .map(|l| l.rect.bottom)
+            .fold(f32::NEG_INFINITY, f32::max),
+    };
+    let rules = rules::detect(image, &ordered, bounds, height);
+    println!("  height={height:.1} horizontal={:?}", rules.horizontal);
+    println!("  vertical={:?}", rules.vertical);
+    let rows = group_text_rows(&ordered, height);
+    let physical = positions(&rules.vertical, bounds.left, bounds.right);
+    println!(
+        "  physical={physical:?} columns={:?}",
+        infer_columns(&rows, height, &physical)
+    );
+}
+
+#[cfg(test)]
 fn detect_grid(image: &RgbaImage, bounds: Rect, height: f32) -> (Vec<f32>, Vec<f32>) {
     let rules = rules::detect(image, &[], bounds, height);
     (
@@ -563,6 +1077,96 @@ mod tests {
 
     fn white() -> RgbaImage {
         RgbaImage::from_pixel(350, 160, Rgba([255; 4]))
+    }
+
+    /// OneOCR boxes of a 5×5 screenshot table (cells 190/60/80/90/90 × 40 px).
+    fn screenshot_lines() -> Vec<TextLine> {
+        let rows = [
+            ["项目", "Qty", "单价", "金额", "备注"],
+            ["笔记本 Notebook", "2", "24.00", "48.00", "办公"],
+            ["签字笔", "3", "6.00", "18.00", ""],
+            ["Stapler", "1", "35.50", "35.50", "会议室"],
+            ["合计 Total", "6", "", "101.50", "已报销"],
+        ];
+        let lefts = [31.0, 222.0, 282.0, 362.0, 452.0];
+        let mut lines = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
+            for (c, text) in row.iter().enumerate().filter(|(_, text)| !text.is_empty()) {
+                let width = text.chars().count() as f32 * 11.0 + 8.0;
+                lines.push(TextLine {
+                    text: (*text).into(),
+                    rect: Rect {
+                        left: lefts[c],
+                        top: 31.5 + r as f32 * 40.0,
+                        right: lefts[c] + width,
+                        bottom: 50.0 + r as f32 * 40.0,
+                    },
+                });
+            }
+        }
+        lines
+    }
+
+    const SCREENSHOT_TSV: &str = "项目\tQty\t单价\t金额\t备注\n笔记本 Notebook\t2\t24.00\t48.00\t办公\n签字笔\t3\t6.00\t18.00\t\nStapler\t1\t35.50\t35.50\t会议室\n合计 Total\t6\t\t101.50\t已报销";
+
+    #[test]
+    fn dark_theme_grid_uses_its_light_rules() {
+        let mut image = RgbaImage::from_pixel(550, 240, Rgba([30, 30, 30, 255]));
+        let grey = Rgba([90, 90, 90, 255]);
+        for x in [20, 210, 270, 350, 440, 530] {
+            for y in 20..=220 {
+                image.put_pixel(x, y, grey);
+            }
+        }
+        for y in [20, 60, 100, 140, 180, 220] {
+            for x in 20..=530 {
+                image.put_pixel(x, y, grey);
+            }
+        }
+        assert_eq!(reconstruct(&screenshot_lines(), &image), SCREENSHOT_TSV);
+    }
+
+    #[test]
+    fn zebra_stripe_edges_are_not_partial_cell_borders() {
+        let mut image = RgbaImage::from_pixel(550, 240, Rgba([255; 4]));
+        for top in [60, 140] {
+            for y in top..top + 40 {
+                for x in 20..530 {
+                    image.put_pixel(x, y, Rgba([236, 241, 248, 255]));
+                }
+            }
+        }
+        assert_eq!(reconstruct(&screenshot_lines(), &image), SCREENSHOT_TSV);
+    }
+
+    #[test]
+    fn wrapped_chinese_cell_lines_join_without_spaces() {
+        let mut image = RgbaImage::from_pixel(350, 160, Rgba([255; 4]));
+        for y in [10, 40, 100] {
+            for x in 10..=340 {
+                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        for x in [10, 170, 340] {
+            for y in 10..=100 {
+                image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+            }
+        }
+        // One ruled body row: the first cell wraps over three lines, the second
+        // over two. Neither wrap is a separate table row.
+        let lines = [
+            line("标准", 20.0, 20.0, 30.0),
+            line("Notes", 180.0, 20.0, 40.0),
+            line("现行国家标", 20.0, 50.0, 60.0),
+            line("Total amount", 180.0, 50.0, 90.0),
+            line("准《公共建 筑》", 20.0, 64.0, 60.0),
+            line("is due", 180.0, 64.0, 50.0),
+            line("说明", 20.0, 78.0, 30.0),
+        ];
+        assert_eq!(
+            reconstruct(&lines, &image),
+            "标准\tNotes\n现行国家标准《公共建筑》说明\tTotal amount is due"
+        );
     }
 
     #[test]

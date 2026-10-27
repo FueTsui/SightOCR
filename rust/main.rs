@@ -9,6 +9,18 @@ use std::path::PathBuf;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // A fixed-purpose helper changes only this executable's installation marker.
+    if args.len() == 2 && args[0] == "--set-run-as-admin" {
+        let enabled = match args[1].as_str() {
+            "on" => true,
+            "off" => false,
+            _ => std::process::exit(2),
+        };
+        if elevation::write_current_setting(enabled).is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
     // A private child owns blocking network/native OCR work. Never attach a
     // console, start another UI or write credentials/diagnostics on this path.
     if args.len() == 2 && args[0] == worker::SUBPROCESS_ARG {

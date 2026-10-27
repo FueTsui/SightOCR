@@ -5,7 +5,7 @@
 //! selection, undo, and IME for the original logical-order Unicode text.
 //! https://learn.microsoft.com/windows/win32/controls/about-rich-edit-controls
 
-use super::theme::Palette;
+use super::{motion, theme::Palette};
 #[path = "native_font_runs.rs"]
 mod native_font_runs;
 #[path = "native_ime.rs"]
@@ -42,19 +42,20 @@ use windows_sys::Win32::{
         Threading::GetCurrentThreadId,
     },
     UI::{
-        HiDpi::GetDpiForWindow,
+        HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
         Input::KeyboardAndMouse::{GetFocus, SetFocus},
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, GetWindowLongW, GetWindowThreadProcessId, IsChild,
-            IsWindow, IsWindowVisible, PostMessageW, SendMessageW, SetWindowLongW, SetWindowPos,
-            ShowWindow, WindowFromPoint, ES_AUTOVSCROLL, ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN,
-            GWL_STYLE, HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, WM_CHAR,
-            WM_CLEAR, WM_CUT, WM_HSCROLL, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
-            WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONUP,
-            WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE,
-            WM_SETFOCUS, WM_UNDO, WM_USER, WM_VSCROLL, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-            WS_TABSTOP, WS_VSCROLL,
+            CreateWindowExW, DestroyWindow, GetScrollBarInfo, GetScrollInfo, GetWindowLongW,
+            GetWindowThreadProcessId, IsChild, IsWindow, IsWindowVisible, PostMessageW,
+            SendMessageW, SetWindowLongW, SetWindowPos, ShowWindow, WindowFromPoint,
+            ES_AUTOVSCROLL, ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN, GWL_STYLE, HWND_TOP,
+            OBJID_VSCROLL, SB_PAGEDOWN, SB_PAGEUP, SB_VERT, SCROLLBARINFO, SCROLLINFO, SIF_ALL,
+            SM_CXVSCROLL, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, WM_CHAR, WM_CLEAR,
+            WM_CUT, WM_HSCROLL, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
+            WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL,
+            WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_SETFOCUS, WM_UNDO, WM_USER, WM_VSCROLL,
+            WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_TABSTOP, WS_VSCROLL,
         },
     },
 };
@@ -85,6 +86,10 @@ const EM_GETLANGOPTIONS: u32 = WM_USER + 121;
 const EM_SETBIDIOPTIONS: u32 = WM_USER + 200;
 const EM_SETTYPOGRAPHYOPTIONS: u32 = WM_USER + 202;
 const EM_SETEDITSTYLE: u32 = WM_USER + 204;
+const EM_GETSCROLLPOS: u32 = WM_USER + 221;
+const EM_SETSCROLLPOS: u32 = WM_USER + 222;
+/// Keep the (hidden) native scroll bar reserved so the text width never changes.
+const ES_DISABLENOSCROLL: u32 = 0x2000;
 const SCF_ALL: usize = 4;
 const CFM_SIZE: u32 = 0x8000_0000;
 const CFM_COLOR: u32 = 0x4000_0000;
@@ -553,6 +558,8 @@ pub(super) struct NativeEditors {
     added_child_clipping: bool,
     initialized_com: bool,
     popup_rects: Vec<Rect>,
+    /// Consecutive frames in which egui reported an open popup that drew nothing.
+    unseen_popup_frames: u8,
     wheel_router: Rc<WheelRouter>,
 }
 
@@ -610,6 +617,7 @@ impl NativeEditors {
                 added_child_clipping,
                 initialized_com,
                 popup_rects: Vec::new(),
+                unseen_popup_frames: 0,
                 wheel_router,
             })
         })();
@@ -687,11 +695,30 @@ impl NativeEditors {
                 enabled,
                 focus,
             });
+            if editor.visible {
+                editor.scrollbar(ui, clipped);
+            }
         }
     }
 
     pub(super) fn end_frame(&mut self, ctx: &egui::Context, hidden: bool) {
-        let popups = active_popup_rects(ctx);
+        let mut popups = active_popup_rects(ctx);
+        // A popup may open one frame before its area is measured; hide the editors
+        // for that frame. One still undrawn after that belongs to a widget that is
+        // gone (a dropdown open when its page closed): close it instead of hiding
+        // both editors indefinitely.
+        if popups.is_none() {
+            self.unseen_popup_frames = self.unseen_popup_frames.saturating_add(1);
+            if self.unseen_popup_frames > 2 {
+                ctx.memory_mut(|memory| memory.close_popup());
+                popups = Some(Vec::new());
+                self.unseen_popup_frames = 0;
+            } else {
+                ctx.request_repaint();
+            }
+        } else {
+            self.unseen_popup_frames = 0;
+        }
         let hidden = hidden || popups.is_none() || ctx.memory(|m| m.top_modal_layer().is_some());
         self.popup_rects = popups.unwrap_or_default();
         let palette = Palette::get(ctx);
@@ -900,6 +927,7 @@ impl Editor {
                     | WS_CLIPSIBLINGS
                     | WS_TABSTOP
                     | WS_VSCROLL
+                    | ES_DISABLENOSCROLL
                     | (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | ES_NOHIDESEL) as u32,
                 0,
                 0,
@@ -1229,11 +1257,163 @@ impl Editor {
         }
     }
 
+    /// Physical width of the reserved native scroll bar at this window's DPI.
+    fn scrollbar_width(&self) -> i32 {
+        // SAFETY: Read-only DPI and metric queries for our own live child.
+        unsafe { GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(self.hwnd).max(96)) }
+    }
+
+    /// A slim, theme-coloured scrollbar drawn by egui over the clipped native one.
+    /// Hidden while the text fits; widens on hover; drag, click-to-page and wheel.
+    fn scrollbar(&mut self, ui: &egui::Ui, rect: Rect) {
+        let ctx = ui.ctx();
+        let ppp = ctx.pixels_per_point();
+        let strip = Rect::from_min_max(
+            egui::pos2(
+                rect.right() - self.scrollbar_width() as f32 / ppp,
+                rect.top(),
+            ),
+            rect.right_bottom(),
+        );
+        // With ES_DISABLENOSCROLL a bar that is not needed is only disabled, and
+        // it keeps reporting a placeholder range: treat it as "text fits".
+        // SAFETY: SCROLLBARINFO is plain data; the query targets our own child.
+        let disabled = unsafe {
+            let mut bar: SCROLLBARINFO = zeroed();
+            bar.cbSize = size_of::<SCROLLBARINFO>() as u32;
+            GetScrollBarInfo(self.hwnd, OBJID_VSCROLL, &mut bar) == 0
+                || bar.rgstate[0] & 0x0001 != 0 // STATE_SYSTEM_UNAVAILABLE
+        };
+        if disabled {
+            return;
+        }
+        // SAFETY: SCROLLINFO is plain data; the query targets our own child.
+        let info = unsafe {
+            let mut info: SCROLLINFO = zeroed();
+            info.cbSize = size_of::<SCROLLINFO>() as u32;
+            info.fMask = SIF_ALL;
+            if GetScrollInfo(self.hwnd, SB_VERT, &mut info) == 0 {
+                return;
+            }
+            info
+        };
+        let range = (info.nMax - info.nMin + 1) as f32;
+        let page = info.nPage as f32;
+        if page <= 0.0 || range <= page + 1.0 {
+            return;
+        }
+        let p = Palette::get(ctx);
+        let id = egui::Id::new(("native_scrollbar", self.hwnd as usize));
+        let response = ui.interact(strip, id, Sense::click_and_drag());
+        let active = response.hovered() || response.dragged();
+        let hover = motion::toggle(ctx, id.with("hover"), active, motion::FAST);
+        if active {
+            ctx.set_cursor_icon(egui::CursorIcon::Default);
+        }
+        let track = strip.shrink2(egui::vec2(0.0, 6.0));
+        let thumb_length = (track.height() * page / range)
+            .max(28.0)
+            .min(track.height());
+        let travel = (track.height() - thumb_length).max(1.0);
+        let max_position = (range - page).max(1.0);
+        let position = (info.nPos - info.nMin) as f32;
+        let thumb_top = track.top() + travel * (position / max_position).clamp(0.0, 1.0);
+        let width = egui::lerp(4.0..=8.0, hover);
+        let thumb = Rect::from_min_size(
+            egui::pos2(strip.right() - 3.0 - width, thumb_top),
+            egui::vec2(width, thumb_length),
+        );
+        if hover > 0.0 {
+            ui.painter().rect_filled(
+                Rect::from_min_max(
+                    egui::pos2(thumb.left() - 2.0, track.top()),
+                    egui::pos2(thumb.right() + 2.0, track.bottom()),
+                ),
+                (width / 2.0 + 2.0) as u8,
+                p.panel_alt.gamma_multiply(hover),
+            );
+        }
+        let colour = motion::mix(p.subtle.gamma_multiply(0.6), p.muted, hover);
+        ui.painter().rect_filled(thumb, (width / 2.0) as u8, colour);
+
+        let to_position = |top: f32| {
+            info.nMin as f32 + ((top - track.top()) / travel).clamp(0.0, 1.0) * max_position
+        };
+        let grab_id = id.with("grab");
+        if response.drag_started() {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                // Grabbing outside the thumb centres it under the pointer.
+                let grab = if thumb.y_range().contains(pointer.y) {
+                    pointer.y - thumb.top()
+                } else {
+                    thumb_length / 2.0
+                };
+                ctx.data_mut(|data| data.insert_temp(grab_id, grab));
+            }
+        }
+        if response.dragged() {
+            if let (Some(pointer), Some(grab)) = (
+                response.interact_pointer_pos(),
+                ctx.data(|data| data.get_temp::<f32>(grab_id)),
+            ) {
+                self.scroll_to(to_position(pointer.y - grab));
+            }
+        } else if response.clicked() {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                if !thumb.y_range().contains(pointer.y) {
+                    let command = if pointer.y < thumb.top() {
+                        SB_PAGEUP
+                    } else {
+                        SB_PAGEDOWN
+                    };
+                    // SAFETY: A standard scroll command to our own child.
+                    unsafe { SendMessageW(self.hwnd, WM_VSCROLL, command as usize, 0) };
+                    self.wake.invalidate_rendering();
+                    ctx.request_repaint();
+                }
+            }
+        }
+        if response.hovered() {
+            let delta = ui.input(|input| input.raw_scroll_delta.y);
+            if delta != 0.0 {
+                self.scroll_to(position + info.nMin as f32 - delta * ppp);
+            }
+        }
+    }
+
+    fn scroll_to(&mut self, y: f32) {
+        // SAFETY: POINT is written by and read from our own child synchronously.
+        unsafe {
+            let mut point = POINT { x: 0, y: 0 };
+            SendMessageW(
+                self.hwnd,
+                EM_GETSCROLLPOS,
+                0,
+                &mut point as *mut POINT as isize,
+            );
+            point.y = y.round().max(0.0) as i32;
+            SendMessageW(
+                self.hwnd,
+                EM_SETSCROLLPOS,
+                0,
+                &point as *const POINT as isize,
+            );
+        }
+        self.wake.invalidate_rendering();
+        self.wake.ctx.request_repaint();
+    }
+
     fn apply_occlusion(&mut self, popups: &[Rect], pixels_per_point: f32) -> bool {
         let Some(bounds @ [_, _, width, height]) = self.bounds else {
             return true;
         };
-        let cutouts = popup_cutouts(popups, bounds, pixels_per_point);
+        let mut cutouts = popup_cutouts(popups, bounds, pixels_per_point);
+        // The native scroll bar keeps working (wheel, keys, selection) but is never
+        // shown: egui draws a slim overlay in its place (see `Editor::scrollbar`).
+        let strip = self.scrollbar_width();
+        if strip > 0 && strip < width {
+            cutouts.push([width - strip, 0, width, height]);
+        }
         if self.cutouts == cutouts && self.region_size == [width, height] {
             return true;
         }
@@ -2610,6 +2790,31 @@ mod tests {
         }
         assert!(!editor.visible);
         assert!(!editor.wake.redraw_pending.get());
+    }
+
+    #[test]
+    fn stale_popup_without_a_widget_does_not_hide_editors_indefinitely() {
+        let parent = TestParent::new();
+        let ctx = egui::Context::default();
+        let mut editors = NativeEditors::new(parent.0 as usize, ctx.clone()).unwrap();
+        for editor in &mut editors.editors {
+            editor.set_text("Recognition completed");
+            editor.requested = Some(Placement {
+                rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 160.0)),
+                enabled: true,
+                focus: false,
+            });
+        }
+        // A dropdown was open when its page closed: egui still reports it open,
+        // but no area is drawn for it any more.
+        ctx.memory_mut(|memory| memory.open_popup(egui::Id::new("closed-settings-dropdown")));
+        editors.end_frame(&ctx, false);
+        assert!(editors.editors.iter().all(|editor| !editor.visible));
+        for _ in 0..2 {
+            editors.end_frame(&ctx, false);
+        }
+        assert!(!ctx.memory(|memory| memory.any_popup_open()));
+        assert!(editors.editors.iter().all(|editor| editor.visible));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-param([switch]$Installer, [string]$IsccPath = $env:SIGHTOCR_ISCC, [switch]$SkipOptionalFontTests)
+param([switch]$Installer, [switch]$SkipOptionalFontTests)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
@@ -32,15 +32,21 @@ Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/sightocr-mcp.exe'
 foreach ($name in @('oneocr.dll', 'onnxruntime.dll', 'oneocr.onemodel')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "resources/oneocr/$name") -Destination $modelRoot -Force
 }
-Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $stagingRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $stagingRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'skills') -Destination $stagingRoot -Recurse
+# Ship user documentation only; development records stay in the repository.
+$shippedDocs = @('USAGE.md', 'INSTALLATION.md', 'MCP.md')
 $stagingDocs = Join-Path $stagingRoot 'docs'
 New-Item -ItemType Directory -Path $stagingDocs -Force | Out-Null
-foreach ($name in @('RUST_REFACTOR.md', 'VALIDATION.md', 'UI_DESIGN.md', 'INSTALLATION.md', 'MCP.md')) {
-    $sourceDocument = Join-Path $projectRoot "docs/$name"
-    if (Test-Path -LiteralPath $sourceDocument) { Copy-Item -LiteralPath $sourceDocument -Destination $stagingDocs }
+foreach ($name in $shippedDocs) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot "docs/$name") -Destination $stagingDocs
 }
+# Drop README lines that link to documents the package does not contain.
+$readme = [IO.File]::ReadAllLines((Join-Path $projectRoot 'README.md'), [Text.UTF8Encoding]::new($false)) | Where-Object {
+    $links = [regex]::Matches($_, '\]\(docs/([^)#]+\.md)')
+    -not ($links | Where-Object { $shippedDocs -notcontains $_.Groups[1].Value })
+}
+[IO.File]::WriteAllLines((Join-Path $stagingRoot 'README.md'), [string[]]$readme, [Text.UTF8Encoding]::new($false))
 # Preserve existing packages outside the publish directory rather than carrying
 # stale Python bundles, user configuration or logs into the new package.
 function Assert-WorkspacePath([string]$Candidate) {
@@ -72,26 +78,23 @@ try {
     throw
 }
 if ($Installer) {
-    $compiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-    $candidates = @($IsccPath)
-    if ($compiler) { $candidates += $compiler.Source }
-    $candidates += Join-Path $projectRoot 'target/tools/innosetup-6.7.3/ISCC.exe'
-    if (${env:ProgramFiles(x86)}) { $candidates += Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe' }
-    $resolvedCompiler = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
-    if (-not $resolvedCompiler) { throw 'Inno Setup 6 is required. Run scripts/prepare-installer.ps1, or set SIGHTOCR_ISCC / -IsccPath.' }
-    if ($IsccPath -and -not (Test-Path -LiteralPath $IsccPath -PathType Leaf)) { throw 'The explicit Inno compiler path does not exist.' }
+    # SightOCR's own setup program packs the published folder after itself.
     $versionMatch = [regex]::Match((Get-Content -Raw (Join-Path $projectRoot 'Cargo.toml')), '(?m)^version\s*=\s*"([^"]+)"')
     if (-not $versionMatch.Success) { throw 'Package version is missing from Cargo.toml.' }
-    & $resolvedCompiler "/DMyAppVersion=$($versionMatch.Groups[1].Value)" (Join-Path $projectRoot 'SightOCR.iss')
-    if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
-    $installerPath = Join-Path $projectRoot "dist/installer/SightOCR-Setup-$($versionMatch.Groups[1].Value).exe"
+    $installerDir = Join-Path $projectRoot 'dist/installer'
+    New-Item -ItemType Directory -Path $installerDir -Force | Out-Null
+    $installerPath = Join-Path $installerDir "SightOCR-Setup-$($versionMatch.Groups[1].Value).exe"
+    # The release build has no console, so wait for it explicitly.
+    $packer = Start-Process -FilePath (Join-Path $projectRoot 'target/release/SightOCR-Setup.exe') `
+        -ArgumentList @('--pack', "`"$packageRoot`"", "`"$installerPath`"") -Wait -PassThru -NoNewWindow
+    if ($packer.ExitCode -ne 0) { throw "Installer packaging failed ($($packer.ExitCode))." }
     if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) { throw 'Installer output is missing.' }
     $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash
     $programHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'SightOCR.exe') -Algorithm SHA256).Hash
     $mcpHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'sightocr-mcp.exe') -Algorithm SHA256).Hash
-    # Publish alongside the setup asset for clients whose GitHub digest is absent.
+    # Published next to the setup asset for clients whose GitHub digest is absent.
     $checksumText = "$installerHash  $([IO.Path]::GetFileName($installerPath))`n$programHash  ../SightOCR/SightOCR.exe`n$mcpHash  ../SightOCR/sightocr-mcp.exe`n"
-    [IO.File]::WriteAllText((Join-Path $projectRoot 'dist/installer/SHA256SUMS.txt'), $checksumText, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $installerDir 'SHA256SUMS.txt'), $checksumText, [Text.UTF8Encoding]::new($false))
     Write-Host "Installer: $installerPath"
     Write-Host "Installer SHA256: $installerHash"
 }

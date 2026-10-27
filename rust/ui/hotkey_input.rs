@@ -466,7 +466,6 @@ pub(super) fn field(ui: &mut egui::Ui, target: Target, value: &str) {
             begin(ui.ctx(), target);
         }
     }
-    response.on_hover_cursor(egui::CursorIcon::PointingHand);
 }
 
 #[cfg(test)]

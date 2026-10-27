@@ -4,7 +4,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use sightocr::{
     config::{Config, LANGUAGES},
     platform::{self, Platform, PlatformEvent, SingleInstance},
-    updater::{PreparedUpdate, UpdateProgress},
+    updater::{PreparedUpdate, UpdateInfo, UpdateProgress},
     worker::{self, Output, Progress, ProgressStage, Request, Task, Worker},
 };
 use std::{
@@ -21,6 +21,8 @@ use std::{
 mod fonts;
 #[path = "ui/hotkey_input.rs"]
 mod hotkey_input;
+#[path = "ui/motion.rs"]
+mod motion;
 #[path = "ui/native_text.rs"]
 mod native_text;
 #[path = "ui/progress.rs"]
@@ -61,13 +63,6 @@ const OCR_MODES: &[(&str, &str)] = &[
     ("Tencent_table", "腾讯 · 表格"),
     ("Tencent_formula", "腾讯 · 公式"),
 ];
-const TRANSLATORS: &[(&str, &str)] = &[
-    ("默认", "Bing"),
-    ("Baidu", "百度"),
-    ("Tencent", "腾讯"),
-    ("OpenAI", "OpenAI"),
-    ("Nvidia", "NVIDIA"),
-];
 
 const WINDOW_SIZE: [f32; 2] = [740.0, 680.0];
 
@@ -97,6 +92,9 @@ struct PendingCapture {
 enum Event {
     UpdateProgress(UpdateProgress),
     UpdateCompleted(Result<Option<PreparedUpdate>, String>),
+    UpdateChecked(Result<Option<Box<UpdateInfo>>, String>),
+    /// A scheduled background update check is due.
+    UpdateDue,
     Platform(PlatformEvent),
     Capture {
         id: u64,
@@ -105,6 +103,11 @@ enum Event {
     },
     Completed(Output),
     Progress(Progress),
+    ServiceTest {
+        id: u64,
+        result: Result<String, String>,
+        seconds: f32,
+    },
 }
 
 pub fn run(silent: bool) -> Result<()> {
@@ -115,6 +118,7 @@ pub fn run(silent: bool) -> Result<()> {
     let _legacy_cleanup = crate::legacy_cache::Cleanup::start()?;
     let (mut config, path) = Config::load()?;
     config.autostart = platform::is_autostart_enabled()?;
+    config.run_as_admin = crate::elevation::is_enabled()?;
     let icon = image::load_from_memory(include_bytes!("../assets/icon.png"))?.into_rgba8();
     let options = eframe::NativeOptions {
         viewport: main_viewport()
@@ -162,6 +166,8 @@ struct App {
     settings_open: bool,
     settings_error: String,
     settings_tab: usize,
+    service_test: settings_ui::ServiceTest,
+    service_test_id: u64,
     compact_result_tab: usize,
     capture_translate: bool,
     silent_job: bool,
@@ -175,6 +181,9 @@ struct App {
     status: String,
     warning: String,
     error: String,
+    /// Mode, recognition engine and translator last frame. A failure notice
+    /// belongs to the choice that produced it and clears when any changes.
+    last_choices: (bool, String, String),
     busy: bool,
     capturing: bool,
     cancelled: bool,
@@ -300,7 +309,13 @@ impl App {
                     wake_ui(&ctx, hwnd);
                 }
             })?;
-        Ok(Self {
+        update_ui::start_scheduler(
+            sender.clone(),
+            cc.egui_ctx.clone(),
+            hwnd,
+            config.last_update_check,
+        );
+        let mut app = Self {
             logo,
             draft: config.clone(),
             config,
@@ -308,8 +323,11 @@ impl App {
             settings_open: false,
             settings_error: String::new(),
             settings_tab: 0,
+            service_test: settings_ui::ServiceTest::Idle,
+            service_test_id: 0,
             compact_result_tab: 0,
             capture_translate: false,
+            last_choices: (false, String::new(), String::new()),
             silent_job: false,
             editing_text: false,
             focus_source: false,
@@ -352,7 +370,9 @@ impl App {
             smoke_copies: None,
             #[cfg(debug_assertions)]
             smoke_capture_probe: None,
-        })
+        };
+        app.note_version_change();
+        Ok(app)
     }
 
     fn show(&mut self, ctx: &egui::Context) {
@@ -412,6 +432,8 @@ impl App {
             self.capture_translate = translate;
         }
         self.settings_open = false;
+        // The window hides for capture; an open dropdown must not survive it.
+        ctx.memory_mut(|memory| memory.close_popup());
         let transitions = match window_chrome::CaptureTransitions::disable(self.hwnd) {
             Ok(transitions) => transitions,
             Err(error) => {
@@ -541,6 +563,8 @@ impl App {
             match event {
                 Event::UpdateProgress(progress) => self.update.progress(progress),
                 Event::UpdateCompleted(result) => self.finish_update(ctx, result),
+                Event::UpdateChecked(result) => self.finish_update_check(result),
+                Event::UpdateDue => self.background_update_check(ctx),
                 Event::Progress(progress) => {
                     if progress.id != self.request_id || !self.busy || self.cancelled {
                         continue;
@@ -585,6 +609,11 @@ impl App {
                         self.capture(ctx, true);
                     }
                 }
+                Event::ServiceTest {
+                    id,
+                    result,
+                    seconds,
+                } => self.finish_service_test(id, result, seconds),
                 Event::Platform(PlatformEvent::Show) => self.show(ctx),
                 Event::Platform(PlatformEvent::Settings) => {
                     hotkey_input::clear(ctx);
@@ -682,11 +711,41 @@ impl App {
         }
     }
 
+    /// Switching between recognition and translation, or to another engine or
+    /// translator, makes the previous failure notice stale: clear it, as a
+    /// Windows info bar is dismissed when its context changes.
+    fn dismiss_notice_on_switch(&mut self) {
+        let choices = (
+            self.capture_translate,
+            self.config.last_ocr_selection.clone(),
+            self.config.last_translate_selection.clone(),
+        );
+        if choices == self.last_choices {
+            return;
+        }
+        let first_frame = self.last_choices.1.is_empty() && self.last_choices.2.is_empty();
+        self.last_choices = choices;
+        if first_frame || self.busy {
+            return;
+        }
+        if !self.error.is_empty() || !self.warning.is_empty() {
+            self.error.clear();
+            self.warning.clear();
+            if self.status == "处理失败，可重试或切换接口" {
+                self.status = "就绪".into();
+            }
+        }
+    }
+
     fn save_draft(&mut self) -> Result<()> {
         #[cfg(debug_assertions)]
         anyhow::ensure!(self.smoke_copies.is_none(), "冒烟测试不修改系统或用户设置");
         // The modeless settings window may be open while the main selections change.
         self.draft.last_ocr_selection = self.config.last_ocr_selection.clone();
+        // Update bookkeeping changes outside the settings page; never roll it back.
+        self.draft.skipped_update_version = self.config.skipped_update_version.clone();
+        self.draft.last_update_check = self.config.last_update_check;
+        self.draft.last_run_version = self.config.last_run_version.clone();
         self.draft.normalize()?;
         let previous = self.config.clone();
         let platform = self
@@ -702,7 +761,8 @@ impl App {
         )?;
         let result = (|| {
             platform::set_autostart(self.draft.autostart)?;
-            self.draft.save(&self.path)
+            self.draft.save(&self.path)?;
+            crate::elevation::set_enabled(self.draft.run_as_admin)
         })();
         if let Err(error) = result {
             let rollback = platform.update(
@@ -712,12 +772,18 @@ impl App {
                 previous.hide_tray_icon,
             );
             let startup_rollback = startup_snapshot.restore();
+            let config_rollback = previous.save(&self.path);
             rollback.context("保存失败，且热键回滚失败")?;
             startup_rollback.context("保存失败，且开机启动回滚失败")?;
+            config_rollback.context("保存失败，且配置文件回滚失败")?;
             return Err(error);
         }
         self.config = self.draft.clone();
-        self.status = "设置已保存".into();
+        self.status = if previous.run_as_admin != self.config.run_as_admin {
+            "设置已保存，管理员运行选项将在下次启动时生效".into()
+        } else {
+            "设置已保存".into()
+        };
         Ok(())
     }
 
@@ -770,6 +836,7 @@ impl eframe::App for App {
         self.native_editors
             .begin_frame(&mut self.source, &mut self.translation);
         self.consume_native_requests(ctx);
+        self.dismiss_notice_on_switch();
         if !self.settings_open || self.settings_tab != settings_ui::HOTKEYS_TAB {
             hotkey_input::clear(ctx);
         }

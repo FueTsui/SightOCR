@@ -28,8 +28,8 @@ MCP 通过标准输入输出运行，不监听网络端口，不启动桌面窗�
 
 | 工具 | 参数 | 用途 |
 | --- | --- | --- |
-| `sightocr_ocr` | `image_path`，可选 `table` | 读取本机 PNG/JPEG/BMP/WebP 并本地识别；不上传图片 |
-| `sightocr_translate` | `text`，可选 `source_lang`、`target_lang`、`provider` | 按所选服务翻译文本；会访问网络 |
+| `sightocr_ocr` | `image_path`，可选 `table`、`layout` | 读取本机 PNG/JPEG/BMP/WebP 并本地识别；不上传图片 |
+| `sightocr_translate` | `text`，可选 `source_lang`、`target_lang`、`provider`（`bing`、`baidu`、`tencent` 或 `model:<模型接口编号>`；旧名称 `openai`、`nvidia`、`generic` 仍可用） | 按所选服务翻译文本；会访问网络 |
 | `sightocr_languages` | 空对象 | 列出可选语言与代码 |
 
 工具发现提供输入及输出 schema、只读/网络访问提示。调用结果提供文本内容和 `structuredContent`。stdout 只传输 JSON-RPC 消息，诊断写入 stderr。当前服务串行处理调用，单个后台任务上限为 120 秒；取消通知不会中断正在执行的任务，关闭 stdin 会在当前调用结束后退出。需要立即停止时由客户端结束服务进程，其后台进程随 Windows Job 一起回收。
@@ -46,11 +46,11 @@ MCP 只读取配置，不迁移旧配置、不保存服务或语言覆盖项，�
 
 ## 开发验证
 
-常规回归随 `cargo test --locked` 运行。使用 Rust 进程集成测试检查 stdio、中文输入、工具错误恢复与配置保持；安装回归使用真实模型验证本地表格 OCR：
+常规回归随 `cargo test --locked` 运行。使用 Rust 进程集成测试检查 stdio、中文输入、工具错误恢复与配置保持；安装回归（PowerShell 7）在隔离环境中安装 `dist/SightOCR`，用安装后的 MCP 与真实模型验证本地表格 OCR：
 
 ```powershell
 ./scripts/test-mcp.ps1
-./scripts/test-installer.ps1
+pwsh -NoProfile -File ./scripts/test-installer.ps1
 ```
 
 这些测试只使用合成图片和同语言翻译，不向在线翻译服务发送请求，不需要 Python。

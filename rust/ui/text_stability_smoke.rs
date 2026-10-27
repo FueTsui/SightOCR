@@ -257,6 +257,126 @@ fn measure(hwnd: usize, body: [i32; 4], directory: &Path, stop: &AtomicBool) -> 
     Ok(report)
 }
 
+/// Transition flash check: sample the real display as fast as possible while the
+/// UI shows, hides, moves and switches native editors, and find near-black blocks.
+#[derive(Debug, Serialize)]
+pub(super) struct FlashReport {
+    pub samples: usize,
+    pub duration_ms: u64,
+    /// Largest number of 16×16 tiles that were at least 85% near-black.
+    pub max_black_tiles: usize,
+    pub worst_at_ms: Option<u64>,
+    pub worst: PathBuf,
+}
+
+pub(super) struct FlashRun {
+    receiver: Receiver<Result<FlashReport>>,
+    stop: Arc<AtomicBool>,
+    finished: bool,
+}
+
+const FLASH_DURATION: Duration = Duration::from_secs(5);
+const TILE: usize = 16;
+
+impl FlashRun {
+    pub(super) fn start(
+        hwnd: usize,
+        directory: PathBuf,
+        on_complete: impl FnOnce() + Send + 'static,
+    ) -> Result<Self> {
+        ensure!(hwnd != 0, "过渡闪烁检查未指定窗口");
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let (sender, receiver) = mpsc::channel();
+        thread::Builder::new()
+            .name("sightocr-transition-flash".into())
+            .spawn(move || {
+                let _ = sender.send(measure_flash(hwnd, &directory, &worker_stop));
+                on_complete();
+            })
+            .context("无法启动过渡闪烁检查线程")?;
+        Ok(Self {
+            receiver,
+            stop,
+            finished: false,
+        })
+    }
+
+    /// Never waits on the UI thread.
+    pub(super) fn try_finish(&mut self) -> Option<Result<FlashReport>> {
+        if self.finished {
+            return None;
+        }
+        match self.receiver.try_recv() {
+            Ok(result) => {
+                self.finished = true;
+                Some(result)
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+                self.finished = true;
+                Some(Err(anyhow::anyhow!("过渡闪烁检查线程意外结束")))
+            }
+        }
+    }
+}
+
+impl Drop for FlashRun {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+fn measure_flash(hwnd: usize, directory: &Path, stop: &AtomicBool) -> Result<FlashReport> {
+    std::fs::create_dir_all(directory).context("无法建立过渡闪烁证据目录")?;
+    let started = Instant::now();
+    let mut report = FlashReport {
+        samples: 0,
+        duration_ms: 0,
+        max_black_tiles: 0,
+        worst_at_ms: None,
+        worst: directory.join("worst.png"),
+    };
+    let mut worst = None;
+    while started.elapsed() < FLASH_DURATION {
+        ensure!(!stop.load(Ordering::Acquire), "过渡闪烁检查已停止");
+        let image = live_display_smoke::capture_unobscured(hwnd)?;
+        report.samples += 1;
+        let tiles = black_tiles(&image);
+        if tiles > report.max_black_tiles || worst.is_none() {
+            report.max_black_tiles = report.max_black_tiles.max(tiles);
+            report.worst_at_ms = Some(started.elapsed().as_millis() as u64);
+            worst = Some(image);
+        }
+    }
+    report.duration_ms = started.elapsed().as_millis() as u64;
+    if let Some(image) = worst {
+        save_png(&report.worst, &image)?;
+    }
+    Ok(report)
+}
+
+/// Text strokes never fill most of a 16×16 tile; an unpainted GL area does.
+fn black_tiles(image: &ColorImage) -> usize {
+    let [width, height] = image.size;
+    let mut count = 0;
+    for ty in (0..height.saturating_sub(TILE - 1)).step_by(TILE) {
+        for tx in (0..width.saturating_sub(TILE - 1)).step_by(TILE) {
+            let dark = (ty..ty + TILE)
+                .flat_map(|y| (tx..tx + TILE).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let [r, g, b, _] = image.pixels[y * width + x].to_array();
+                    r.max(g).max(b) <= 40
+                })
+                .count();
+            if dark * 100 >= TILE * TILE * 85 {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 fn crop(image: &ColorImage, rect: [i32; 4]) -> Result<ColorImage> {
     let [x, y, width, height] = rect;
     ensure!(
@@ -371,6 +491,25 @@ mod tests {
             assert_eq!(missing_ink(&erased, bg, &ink), 150);
             assert!(changed_pixels(&baseline, &ColorImage::new([100, 40], Color32::BLACK)) > 150);
         }
+    }
+
+    #[test]
+    fn black_tiles_ignore_text_strokes_but_count_solid_blocks() {
+        let mut image = ColorImage::new([64, 32], Color32::WHITE);
+        // Two-pixel strokes in every other row: dense text, not a block.
+        for y in (0..32).step_by(4) {
+            for x in 0..32 {
+                image.pixels[y * 64 + x] = Color32::from_gray(26);
+                image.pixels[(y + 1) * 64 + x] = Color32::from_gray(26);
+            }
+        }
+        assert_eq!(black_tiles(&image), 0);
+        for y in 0..16 {
+            for x in 32..64 {
+                image.pixels[y * 64 + x] = Color32::BLACK;
+            }
+        }
+        assert_eq!(black_tiles(&image), 2);
     }
 
     #[test]
