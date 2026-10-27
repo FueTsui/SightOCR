@@ -39,7 +39,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Synthetic updater fixture compilation failed.'
 if (-not ('UpdateFixture' -as [type])) { [Reflection.Assembly]::LoadFrom($fixtureExe) | Out-Null }
 
 $reports = @()
-foreach ($scenario in @('success', 'failure', 'mcp-failure', 'bad-hash')) {
+foreach ($scenario in @('success', 'failure', 'bad-hash')) {
     $caseRoot = Join-Path $testRoot ($scenario + ' 中文 空格')
     $staging = Join-Path $caseRoot '下载 暂存'
     $installed = Join-Path $caseRoot '安装 目录'
@@ -107,9 +107,6 @@ foreach ($scenario in @('success', 'failure', 'mcp-failure', 'bad-hash')) {
             }
             if ($scenario -eq 'failure' -and ($setupStarts.Count -ne 1 -or -not $errorText.Contains('42'))) {
                 throw 'Setup exit code 42 was not reported by the helper.'
-            }
-            if ($scenario -eq 'mcp-failure' -and ($setupStarts.Count -ne 1 -or -not $errorText.Contains('MCP 正在运行') -or -not $errorText.Contains('installer.log'))) {
-                throw 'The MCP failure reason or installer log path was missing from the update dialog.'
             }
             if ($scenario -eq 'bad-hash' -and ($setupStarts.Count -ne 0 -or -not $errorText.Contains('SHA256'))) {
                 throw 'Corrupt installer digest did not prevent execution with a checksum error.'

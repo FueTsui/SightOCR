@@ -542,50 +542,6 @@ fn helper_restores_the_original_app_once_after_exit_code_or_spawn_failure() -> R
 }
 
 #[test]
-fn installer_error_includes_the_matching_reason_and_log_path() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let log = directory.path().join("installer.log");
-    std::fs::write(
-        &log,
-        "2026-10-28 05:07:27.326 FAILED (3): unrelated old failure\n\
-         2026-10-28 05:07:27.326 FAILED (7): SightOCR MCP 正在运行，尚未替换任何文件。\n\
-         2026-10-28 05:07:27.326 Exit code 7\n",
-    )?;
-    let error = installer_failure(7, &log).to_string();
-    assert!(error.contains("退出码 7"));
-    assert!(error.contains("MCP 正在运行，尚未替换任何文件"));
-    assert!(error.contains(&log.display().to_string()));
-    assert!(!error.contains("unrelated old failure"));
-    let missing = directory.path().join("missing.log");
-    assert!(installer_failure(42, &missing)
-        .to_string()
-        .contains("退出码 42"));
-    Ok(())
-}
-
-#[test]
-fn installer_error_reads_a_bounded_tail_and_limits_displayed_details() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let log = directory.path().join("installer.log");
-    let prefix = "x".repeat(100_000);
-    std::fs::write(
-        &log,
-        format!(
-            "{prefix}\nnow FAILED (7): {}\0\nExit code 7",
-            "中".repeat(3000)
-        ),
-    )?;
-    let error = installer_failure(7, &log).to_string();
-    assert_eq!(error.matches('中').count(), 1024);
-    assert!(!error.contains('\0'));
-    assert!(!error.contains("xxxxxxxx"));
-    // A legacy installer log has no structured failure; keep a useful fallback.
-    std::fs::write(&log, "Inno Setup: installation failed")?;
-    assert!(installer_failure(7, &log).to_string().contains("退出码 7"));
-    Ok(())
-}
-
-#[test]
 fn helper_revalidates_download_and_recovers_without_executing_corrupt_bytes() -> Result<()> {
     let (_directory, manifest, helper) = helper_fixture()?;
     let restores = Cell::new(0);

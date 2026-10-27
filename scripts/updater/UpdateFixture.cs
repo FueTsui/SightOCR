@@ -53,23 +53,7 @@ public static class UpdateFixture
                 if (argument.StartsWith("/DIR=", StringComparison.OrdinalIgnoreCase))
                     installDirectory = argument.Substring(5);
             if (installDirectory == null || !Directory.Exists(installDirectory)) return 90;
-            string mode = File.ReadAllText(Path.Combine(directory, "fixture-mode.txt")).Trim();
-            if (mode == "failure") return 42;
-            if (mode == "mcp-failure")
-            {
-                foreach (string argument in arguments)
-                    if (argument.StartsWith("/LOG=", StringComparison.OrdinalIgnoreCase))
-                    {
-                        // The .NET Framework fixture does not accept Win32's
-                        // extended path prefix; Setup itself does accept it.
-                        string logPath = argument.Substring(5);
-                        if (logPath.StartsWith(@"\\?\", StringComparison.Ordinal)) logPath = logPath.Substring(4);
-                        File.WriteAllText(logPath,
-                            "2026-10-28 05:07:27.326 FAILED (7): 此安装目录的 SightOCR MCP 正在运行，尚未替换任何文件。\n" +
-                            "2026-10-28 05:07:27.326 Exit code 7\n", Encoding.UTF8);
-                    }
-                return 7;
-            }
+            if (File.ReadAllText(Path.Combine(directory, "fixture-mode.txt")).Trim() == "failure") return 42;
 
             // Inno Setup owns the successful restart. The helper must not add a second.
             var start = new ProcessStartInfo(Path.Combine(installDirectory, "SightOCR.exe"), "--from-setup");

@@ -1,6 +1,6 @@
 [package]
 name = "sightocr"
-version = "2.1.1"
+version = "2.1.0"
 authors = ["FueTsui"]
 edition = "2021"
 rust-version = "1.88"
