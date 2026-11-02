@@ -1,5 +1,17 @@
 # 当前变更说明
 
+## 2026-11-02 修复识别结果滚动时文字闪烁（2.1.1 同版本重打包）
+
+原文与译文由 RichEdit 子窗口显示。它重绘时先擦除整行、再逐段绘制文字，桌面合成可能在两步之间呈现窗口，所以拖动或点击滚动条、在顶部或底部继续滚动时，会看到部分行缺字或整行消失。现改为在子类 `WM_PAINT` 中先用 `WM_PRINTCLIENT` 绘制到内存位图，再一次性复制到窗口；egui 滚动条的滚动与翻页记录为待执行请求，在父窗口完成本帧后暂停重绘、滚动、整窗重绘一次。去掉了向父窗口手动投递 `WM_PAINT` 的做法。版本保持 2.1.1。
+
+- 新增交互测试 `repeated_native_redraws_never_show_half_painted_text`：在测试进程自建的可见窗口中 3 秒内反复整窗重绘，并从另一线程读取该窗口已显示的像素。修复前 202 帧中 76 帧可见未画完的文字（最多缺失 1612 个字迹像素）；给子窗口加 `WS_EX_COMPOSITED` 后仍有 50/187 帧；改为内存位图绘制后连续 4 次均为 0。另新增 `buffered_paint_keeps_selection_highlight_and_scrolled_view` 与 `scrollbar_scrolls_wait_for_the_post_frame_redraw`，分别核对选区高亮与滚动后画面、滚动延后执行。
+- `native_text` 的 8 个交互测试中 7 个通过；`native_popup_hole_preserves_text_and_restores_the_full_window_region` 在未改动的 `a986106` 上以相同方式失败（测试未计入隐藏原生滚动条的裁剪区域），本轮未修改该测试。
+- 用户在 debug 构建中确认滚动闪烁已消失。
+- 在 `C:\dev\sightocr` 运行 `scripts/build.ps1 -Installer -Toolchain 1.97.0-x86_64-pc-windows-msvc`：格式检查、严格 Clippy、串行默认测试通过（254 项通过、27 项显式忽略、0 项失败），随后完成 release 构建与安装包。便携包按原结构以 `SightOCR/` 为根目录重新压缩。
+- 只读解析安装包索引并验证整体数据 SHA-256，逐个解压内置的 11 个文件；安装包与便携包均与 `dist/SightOCR` 逐字节一致。三个 EXE 的文件版本和产品版本为 2.1.1，清单版本 2.1.1.0，Dependent Load Flags 为 `0x800`，无动态 C 运行库导入。改动文件经 gitleaks 扫描无泄露。
+- 当前本地安装包 SHA-256：`F73F1AF087E75EA8099666B514DE17BEA8BFB81EBDE9E41FBFF041730BD61A0B`；便携包：`2CEA17574FDBFD57994F3C5EA17152371CE622B5F2A7B16E7588039FDFDE3D85`。替换此前 `223B883E…71D7` 的同版本构建，旧附件已备份到 `target/flicker-fix-repack-20261102-233019/`。
+- 本节记录本地打包时的验证；发布提交、GitHub CI 和公开附件校验结果以 v2.1.1 Release 的 `VALIDATION.json` 为准。本轮未运行真实 UAC 安装、界面手动复制、Office 粘贴或真实云端服务测试。已安装的 2.1.1 需手动运行新安装包覆盖。
+
 ## 2026-11-02 v2.1.1 正式发布核对
 
 将 2.1.1 功能分支快进合入 `main`；三个历史 release 分支的提交此前已被 `main` 包含，没有遗漏提交，也没有删除分支。README、安装说明与包内文档改为对应 v2.1.1 Release，旧的本地构建记录保留在下文作为历史证据。

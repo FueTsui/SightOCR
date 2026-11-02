@@ -30,11 +30,12 @@ use windows_sys::Win32::Graphics::Gdi::RDW_ERASE;
 #[cfg(test)]
 use windows_sys::Win32::UI::WindowsAndMessaging::WM_SETTEXT;
 use windows_sys::Win32::{
-    Foundation::{FreeLibrary, HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+    Foundation::{FreeLibrary, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Globalization::{GetStringTypeW, C2_LEFTTORIGHT, C2_RIGHTTOLEFT, CT_CTYPE2},
     Graphics::Gdi::{
-        CombineRgn, CreateRectRgn, DeleteObject, RedrawWindow, SetWindowRgn, NULLREGION,
-        RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, RGN_DIFF,
+        BeginPaint, BitBlt, CombineRgn, CreateCompatibleBitmap, CreateCompatibleDC, CreateRectRgn,
+        DeleteDC, DeleteObject, EndPaint, RedrawWindow, SelectObject, SetWindowRgn, NULLREGION,
+        PAINTSTRUCT, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW, RGN_DIFF, SRCCOPY,
     },
     System::{
         Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED},
@@ -46,27 +47,26 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{GetFocus, SetFocus},
         Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, GetScrollBarInfo, GetScrollInfo, GetWindowLongW,
-            GetWindowThreadProcessId, IsChild, IsWindow, IsWindowVisible, PostMessageW,
-            SendMessageW, SetWindowLongW, SetWindowPos, ShowWindow, WindowFromPoint,
+            CreateWindowExW, DestroyWindow, GetClientRect, GetScrollBarInfo, GetScrollInfo,
+            GetWindowLongW, GetWindowThreadProcessId, IsChild, IsWindow, IsWindowVisible,
+            PostMessageW, SendMessageW, SetWindowLongW, SetWindowPos, ShowWindow, WindowFromPoint,
             ES_AUTOVSCROLL, ES_MULTILINE, ES_NOHIDESEL, ES_WANTRETURN, GWL_STYLE, HWND_TOP,
-            OBJID_VSCROLL, SB_PAGEDOWN, SB_PAGEUP, SB_VERT, SCROLLBARINFO, SCROLLINFO, SIF_ALL,
-            SM_CXVSCROLL, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, WM_CHAR, WM_CLEAR,
-            WM_CUT, WM_HSCROLL, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
-            WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL,
-            WM_NCDESTROY, WM_NOTIFY, WM_PAINT, WM_PASTE, WM_SETFOCUS, WM_UNDO, WM_USER, WM_VSCROLL,
-            WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_TABSTOP, WS_VSCROLL,
+            OBJID_VSCROLL, PRF_CLIENT, PRF_ERASEBKGND, SB_PAGEDOWN, SB_PAGEUP, SB_VERT,
+            SCROLLBARINFO, SCROLLINFO, SIF_ALL, SM_CXVSCROLL, SWP_NOACTIVATE, SWP_NOZORDER,
+            SWP_SHOWWINDOW, SW_HIDE, WM_CHAR, WM_CLEAR, WM_CUT, WM_HSCROLL, WM_IME_COMPOSITION,
+            WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+            WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_NCDESTROY, WM_NOTIFY, WM_PAINT,
+            WM_PASTE, WM_PRINTCLIENT, WM_SETFOCUS, WM_SETREDRAW, WM_UNDO, WM_USER, WM_VSCROLL,
+            WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
         },
     },
 };
 #[cfg(any(debug_assertions, test))]
 use windows_sys::Win32::{
     Graphics::Gdi::{
-        CreateCompatibleDC, CreateDIBSection, DeleteDC, GdiFlush, RestoreDC, SaveDC, SelectObject,
-        BITMAPINFO, BI_RGB, DIB_RGB_COLORS,
+        CreateDIBSection, GdiFlush, RestoreDC, SaveDC, BITMAPINFO, BI_RGB, DIB_RGB_COLORS,
     },
     Storage::Xps::{PrintWindow, PW_CLIENTONLY},
-    UI::WindowsAndMessaging::{GetClientRect, PRF_CLIENT, PRF_ERASEBKGND, WM_PRINTCLIENT},
 };
 
 // windows-sys 0.59 does not expose Richedit.h. These messages and repr(C)
@@ -465,6 +465,8 @@ struct EditorWake {
     redraw_pending: Cell<bool>,
     redraw_dirty: Cell<bool>,
     last_visible: Cell<bool>,
+    /// Latest scroll requested by the egui scrollbar, applied after the frame.
+    pending_scroll: Cell<Option<ScrollRequest>>,
     #[cfg(any(debug_assertions, test))]
     redraw_requests: Cell<u64>,
     #[cfg(any(debug_assertions, test))]
@@ -475,6 +477,15 @@ struct EditorWake {
     snapshot_pending: Cell<Option<SnapshotKey>>,
     #[cfg(any(debug_assertions, test))]
     snapshot: RefCell<Option<(SnapshotKey, Option<Vec<Color32>>)>>,
+}
+
+/// A scroll requested while egui builds a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScrollRequest {
+    /// Absolute EM_SETSCROLLPOS offset in physical pixels.
+    To(i32),
+    /// A standard SB_* WM_VSCROLL command.
+    Command(usize),
 }
 
 #[cfg(any(debug_assertions, test))]
@@ -510,6 +521,44 @@ impl EditorWake {
             self.snapshot_generation
                 .set(self.snapshot_generation.get().wrapping_add(1));
             self.snapshot.borrow_mut().take();
+        }
+    }
+
+    /// Apply a scroll queued by the egui scrollbar from the post-swap redraw.
+    ///
+    /// Scrolling inside the egui frame made RichEdit blit its current pixels with
+    /// ScrollWindowEx and paint the exposed strip synchronously, nested inside the
+    /// parent's GL frame. That nested paint can drop glyph runs, and the next blit
+    /// carried the gap to other lines, so text flickered while dragging. With
+    /// redraw suspended the scroll only moves the view; the caller repaints the
+    /// whole child once.
+    fn apply_pending_scroll(&self, hwnd: HWND) {
+        let Some(request) = self.pending_scroll.take() else {
+            return;
+        };
+        // SAFETY: Synchronous messages to our own UI-thread child; POINT is local
+        // storage written and read by EM_GETSCROLLPOS/EM_SETSCROLLPOS.
+        unsafe {
+            // WM_SETREDRAW(TRUE) sets WS_VISIBLE, so only suspend a shown child;
+            // otherwise re-enabling redraw would reveal a hidden editor.
+            let shown = GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_VISIBLE != 0;
+            if shown {
+                SendMessageW(hwnd, WM_SETREDRAW, 0, 0);
+            }
+            match request {
+                ScrollRequest::To(y) => {
+                    let mut point = POINT { x: 0, y: 0 };
+                    SendMessageW(hwnd, EM_GETSCROLLPOS, 0, &mut point as *mut POINT as isize);
+                    point.y = y;
+                    SendMessageW(hwnd, EM_SETSCROLLPOS, 0, &point as *const POINT as isize);
+                }
+                ScrollRequest::Command(command) => {
+                    SendMessageW(hwnd, WM_VSCROLL, command, 0);
+                }
+            }
+            if shown {
+                SendMessageW(hwnd, WM_SETREDRAW, 1, 0);
+            }
         }
     }
 
@@ -956,6 +1005,7 @@ impl Editor {
             redraw_pending: Cell::new(false),
             redraw_dirty: Cell::new(true),
             last_visible: Cell::new(false),
+            pending_scroll: Cell::new(None),
             #[cfg(any(debug_assertions, test))]
             redraw_requests: Cell::new(0),
             #[cfg(any(debug_assertions, test))]
@@ -1032,8 +1082,10 @@ impl Editor {
     }
 
     fn set_text(&mut self, text: &str) {
-        // A deliberate new OCR/result document supersedes any pending preedit.
+        // A deliberate new OCR/result document supersedes any pending preedit
+        // and any scroll still queued for the previous document.
         self.wake.ime_composing.set(false);
+        self.wake.pending_scroll.set(None);
         self.wake.invalidate_rendering();
         let utf16: Vec<u16> = native_line_endings(text).encode_utf16().collect();
         // SAFETY: UTF-16 storage remains live for the synchronous stream callback;
@@ -1316,7 +1368,12 @@ impl Editor {
             .min(track.height());
         let travel = (track.height() - thumb_length).max(1.0);
         let max_position = (range - page).max(1.0);
-        let position = (info.nPos - info.nMin) as f32;
+        // A queued target is where the view is about to be; using it keeps the
+        // thumb under the pointer and lets successive wheel steps accumulate.
+        let position = match self.wake.pending_scroll.get() {
+            Some(ScrollRequest::To(y)) => ((y - info.nMin) as f32).clamp(0.0, max_position),
+            _ => (info.nPos - info.nMin) as f32,
+        };
         let thumb_top = track.top() + travel * (position / max_position).clamp(0.0, 1.0);
         let width = egui::lerp(4.0..=8.0, hover);
         let thumb = Rect::from_min_size(
@@ -1366,10 +1423,7 @@ impl Editor {
                     } else {
                         SB_PAGEDOWN
                     };
-                    // SAFETY: A standard scroll command to our own child.
-                    unsafe { SendMessageW(self.hwnd, WM_VSCROLL, command as usize, 0) };
-                    self.wake.invalidate_rendering();
-                    ctx.request_repaint();
+                    self.request_scroll(ScrollRequest::Command(command as usize));
                 }
             }
         }
@@ -1382,23 +1436,13 @@ impl Editor {
     }
 
     fn scroll_to(&mut self, y: f32) {
-        // SAFETY: POINT is written by and read from our own child synchronously.
-        unsafe {
-            let mut point = POINT { x: 0, y: 0 };
-            SendMessageW(
-                self.hwnd,
-                EM_GETSCROLLPOS,
-                0,
-                &mut point as *mut POINT as isize,
-            );
-            point.y = y.round().max(0.0) as i32;
-            SendMessageW(
-                self.hwnd,
-                EM_SETSCROLLPOS,
-                0,
-                &point as *const POINT as isize,
-            );
-        }
+        self.request_scroll(ScrollRequest::To(y.round().max(0.0) as i32));
+    }
+
+    /// Never scroll the child from inside the egui frame: queue the latest
+    /// request for the post-swap redraw (see `EditorWake::apply_pending_scroll`).
+    fn request_scroll(&mut self, request: ScrollRequest) {
+        self.wake.pending_scroll.set(Some(request));
         self.wake.invalidate_rendering();
         self.wake.ctx.request_repaint();
     }
@@ -1542,6 +1586,9 @@ unsafe extern "system" fn editor_subclass(
             .set(state.wheel_deliveries.get().wrapping_add(1));
     }
     if message == REDRAW_MESSAGE {
+        // Scroll first: a WM_VSCROLL command passes through this subclass and
+        // marks the child dirty, which the full redraw below already covers.
+        state.apply_pending_scroll(hwnd);
         state.redraw_pending.set(false);
         state.redraw_dirty.set(false);
         // A popup may have hidden this child since the frame queued the redraw.
@@ -1557,6 +1604,9 @@ unsafe extern "system" fn editor_subclass(
                 );
             }
         }
+        return 0;
+    }
+    if message == WM_PAINT && paint_buffered(hwnd) {
         return 0;
     }
     #[cfg(any(debug_assertions, test))]
@@ -1625,11 +1675,71 @@ unsafe extern "system" fn editor_subclass(
         state.invalidate_rendering();
         // Never unwind across the system callback boundary. Native input wakes
         // egui immediately so text counts, translation, and copy see current edits.
+        // request_repaint already wakes eframe. Posting WM_PAINT by hand is not
+        // supported by Win32 and forced extra parent GL frames over this child.
         let _ = catch_unwind(AssertUnwindSafe(|| state.ctx.request_repaint()));
-        // SAFETY: Post to the parent that owns this child; no external window I/O.
-        unsafe { PostMessageW(state.parent, WM_PAINT, 0, 0) };
     }
     result
+}
+
+/// Paint the child off screen and show the result with a single copy.
+///
+/// RichEdit erases each line and then draws its glyph runs straight to the
+/// window, and desktop composition can present the window between those steps.
+/// Every full repaint (scrolling, a wheel step at the end, a format change)
+/// therefore briefly showed lines with missing runs. Rendering into a memory
+/// bitmap first makes each visible update complete. Returns false, without
+/// validating anything, when the window has no client area to paint.
+fn paint_buffered(hwnd: HWND) -> bool {
+    // SAFETY: Standard BeginPaint/EndPaint pairing for our own child. Every GDI
+    // object created here is selected out and deleted before returning, and
+    // WM_PRINTCLIENT goes directly to RichEdit below this subclass.
+    unsafe {
+        let mut client: RECT = zeroed();
+        if GetClientRect(hwnd, &mut client) == 0 || client.right <= 0 || client.bottom <= 0 {
+            return false;
+        }
+        let mut paint: PAINTSTRUCT = zeroed();
+        let target = BeginPaint(hwnd, &mut paint);
+        if target.is_null() {
+            return false;
+        }
+        let print = (PRF_CLIENT | PRF_ERASEBKGND) as isize;
+        let memory = CreateCompatibleDC(target);
+        let bitmap = if memory.is_null() {
+            null_mut()
+        } else {
+            CreateCompatibleBitmap(target, client.right, client.bottom)
+        };
+        let shown = !bitmap.is_null() && {
+            let old = SelectObject(memory, bitmap);
+            DefSubclassProc(hwnd, WM_PRINTCLIENT, memory as usize, print);
+            let area = paint.rcPaint;
+            let copied = BitBlt(
+                target,
+                area.left,
+                area.top,
+                area.right - area.left,
+                area.bottom - area.top,
+                memory,
+                area.left,
+                area.top,
+                SRCCOPY,
+            ) != 0;
+            SelectObject(memory, old);
+            DeleteObject(bitmap);
+            copied
+        };
+        if !memory.is_null() {
+            DeleteDC(memory);
+        }
+        if !shown {
+            // Out of GDI resources: draw directly rather than leave a blank area.
+            DefSubclassProc(hwnd, WM_PRINTCLIENT, target as usize, print);
+        }
+        EndPaint(hwnd, &paint);
+        true
+    }
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -3020,6 +3130,386 @@ mod tests {
         editors.editors[0].hide();
         finish_frame(&mut editors, &ctx, placement);
         assert_eq!(editors.native_redraw_requests()[0], before + 3);
+    }
+
+    #[test]
+    fn scrollbar_scrolls_wait_for_the_post_frame_redraw() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PeekMessageW, PM_REMOVE,
+        };
+        fn finish_frame(editors: &mut NativeEditors, ctx: &egui::Context, placement: Placement) {
+            editors.editors[0].requested = Some(placement);
+            editors.end_frame(ctx, false);
+            // SAFETY: Dispatch only our fixture's queued rendering messages.
+            unsafe {
+                let mut message = zeroed();
+                while PeekMessageW(
+                    &mut message,
+                    editors.editors[0].hwnd,
+                    REDRAW_MESSAGE,
+                    REDRAW_MESSAGE,
+                    PM_REMOVE,
+                ) != 0
+                {
+                    DispatchMessageW(&message);
+                }
+            }
+        }
+        let parent = TestParent::new();
+        let ctx = egui::Context::default();
+        let mut editors = NativeEditors::new(parent.0 as usize, ctx.clone()).unwrap();
+        let placement = Placement {
+            rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 150.0)),
+            enabled: true,
+            focus: false,
+        };
+        let text = (0..200)
+            .map(|line| format!("{line}: 港島區太古城 العربية 한국어\n"))
+            .collect::<String>();
+        editors.editors[0].set_text(&text);
+        finish_frame(&mut editors, &ctx, placement);
+        let hwnd = editors.editors[0].hwnd;
+        // A never-shown fixture lays text out lazily, so the first scroll after a
+        // new document can stop short. Settle layout before measuring.
+        // SAFETY: POINT is local storage read synchronously by our own child.
+        unsafe {
+            for y in [10_000, 0] {
+                let point = POINT { x: 0, y };
+                SendMessageW(hwnd, EM_SETSCROLLPOS, 0, &point as *const POINT as isize);
+            }
+        }
+        let start = editors.scroll_positions()[0];
+        assert_eq!(start.1, 0);
+        let requests = editors.native_redraw_requests()[0];
+
+        // Inside the egui frame nothing scrolls yet and only the latest target stays.
+        editors.editors[0].scroll_to(120.0);
+        editors.editors[0].scroll_to(300.0);
+        assert_eq!(
+            editors.scroll_positions()[0],
+            start,
+            "the child must not scroll or paint during the parent's frame"
+        );
+        assert_eq!(
+            editors.editors[0].wake.pending_scroll.get(),
+            Some(ScrollRequest::To(300))
+        );
+        finish_frame(&mut editors, &ctx, placement);
+        let scrolled = editors.scroll_positions()[0];
+        assert_eq!(scrolled.1, 300, "latest target applied");
+        assert!(editors.editors[0].wake.pending_scroll.get().is_none());
+        assert_eq!(
+            editors.native_redraw_requests()[0],
+            requests + 1,
+            "two queued scrolls repaint once"
+        );
+        // SAFETY: Read only the test-owned child's style bits.
+        let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+        assert_ne!(style & WS_VISIBLE, 0, "redraw is re-enabled afterwards");
+
+        // Page clicks are deferred the same way and do not cause a second redraw.
+        editors.editors[0].request_scroll(ScrollRequest::Command(SB_PAGEDOWN as usize));
+        assert_eq!(editors.scroll_positions()[0], scrolled);
+        finish_frame(&mut editors, &ctx, placement);
+        assert!(editors.scroll_positions()[0].1 > scrolled.1);
+        let after_page = editors.native_redraw_requests()[0];
+        assert_eq!(after_page, requests + 2);
+        for _ in 0..20 {
+            finish_frame(&mut editors, &ctx, placement);
+        }
+        assert_eq!(editors.native_redraw_requests()[0], after_page);
+
+        // Applying a scroll to a hidden editor must not re-enable WS_VISIBLE.
+        editors.editors[0].scroll_to(0.0);
+        editors.editors[0].hide();
+        editors.editors[0].wake.apply_pending_scroll(hwnd);
+        assert_eq!(editors.scroll_positions()[0].1, 0);
+        // SAFETY: Read only the test-owned child's style bits.
+        let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+        assert_eq!(style & WS_VISIBLE, 0, "a hidden editor stays hidden");
+
+        // A new document drops a scroll queued for the previous one.
+        editors.editors[0].set_text("short");
+        assert!(editors.editors[0].wake.pending_scroll.get().is_none());
+        assert_eq!(read_text(hwnd).unwrap(), "short");
+    }
+
+    /// Copy the pixels a window currently shows, from another thread, without
+    /// asking it to paint. A non-atomic native paint is visible here mid-way.
+    fn displayed_pixels(hwnd: usize, width: i32, height: i32) -> Option<Vec<Color32>> {
+        use windows_sys::Win32::Graphics::Gdi::{BitBlt, GetDC, ReleaseDC, SRCCOPY};
+        let hwnd = hwnd as HWND;
+        let count = width as usize * height as usize;
+        // SAFETY: BITMAPINFO is SDK POD; initialize a top-down 32-bit RGB bitmap.
+        let mut info: BITMAPINFO = unsafe { zeroed() };
+        info.bmiHeader.biSize = size_of_val_header(&info);
+        info.bmiHeader.biWidth = width;
+        info.bmiHeader.biHeight = -height;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        // SAFETY: Read-only copy of the test-owned window's displayed pixels into
+        // a private DIB; every GDI handle acquired here is released before return.
+        unsafe {
+            let source = GetDC(hwnd);
+            if source.is_null() {
+                return None;
+            }
+            let dc = CreateCompatibleDC(source);
+            let mut data = null_mut();
+            let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut data, null_mut(), 0);
+            let old = SelectObject(dc, bitmap);
+            let copied = BitBlt(dc, 0, 0, width, height, source, 0, 0, SRCCOPY) != 0;
+            GdiFlush();
+            let pixels = std::slice::from_raw_parts(data as *const u8, count * 4)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| Color32::from_rgb(p[2], p[1], p[0]))
+                .collect();
+            SelectObject(dc, old);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
+            ReleaseDC(hwnd, source);
+            copied.then_some(pixels)
+        }
+    }
+
+    struct VisibleFixture {
+        // Field order matters: editors (children) drop before their parent.
+        editors: NativeEditors,
+        ctx: egui::Context,
+        placement: Placement,
+        _parent: TestParent,
+    }
+
+    impl VisibleFixture {
+        /// A visible, topmost, test-owned popup hosting the real editors.
+        fn new(text: &str) -> Self {
+            use std::time::{Duration, Instant};
+            use windows_sys::Win32::UI::WindowsAndMessaging::{WS_EX_TOPMOST, WS_POPUP};
+            // SAFETY: Creates only a test-owned popup on this thread's desktop.
+            let parent = unsafe {
+                CreateWindowExW(
+                    WS_EX_TOPMOST,
+                    wide("STATIC").as_ptr(),
+                    wide("").as_ptr(),
+                    WS_POPUP | WS_VISIBLE,
+                    80,
+                    80,
+                    760,
+                    420,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null(),
+                )
+            };
+            assert!(!parent.is_null());
+            let parent = TestParent(parent);
+            let ctx = egui::Context::default();
+            let mut editors = NativeEditors::new(parent.0 as usize, ctx.clone()).unwrap();
+            let placement = Placement {
+                rect: Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(740.0, 400.0)),
+                enabled: true,
+                focus: false,
+            };
+            editors.editors[0].set_text(text);
+            let mut fixture = Self {
+                editors,
+                ctx,
+                placement,
+                _parent: parent,
+            };
+            fixture.frame();
+            let settle = Instant::now();
+            while settle.elapsed() < Duration::from_millis(500) {
+                pump();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            fixture
+        }
+
+        fn frame(&mut self) {
+            self.editors.editors[0].requested = Some(self.placement);
+            self.editors.end_frame(&self.ctx, false);
+            pump();
+        }
+
+        fn hwnd(&self) -> HWND {
+            self.editors.editors[0].hwnd
+        }
+
+        /// Physical text area, excluding the clipped native scroll bar strip.
+        fn size(&self) -> (i32, i32) {
+            let [_, _, width, height] = self.editors.editors[0].bounds.unwrap();
+            (width - self.editors.editors[0].scrollbar_width(), height)
+        }
+
+        fn shown(&self) -> Vec<Color32> {
+            let (width, height) = self.size();
+            displayed_pixels(self.hwnd() as usize, width, height).expect("displayed pixels")
+        }
+    }
+
+    fn pump() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PeekMessageW, TranslateMessage, PM_REMOVE,
+        };
+        // SAFETY: Dispatch only messages queued for this test thread's windows.
+        unsafe {
+            let mut message = zeroed();
+            while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+    }
+
+    fn color_distance(a: Color32, b: Color32) -> u8 {
+        let (a, b) = (a.to_array(), b.to_array());
+        (0..3).map(|i| a[i].abs_diff(b[i])).max().unwrap()
+    }
+
+    fn dominant_color(pixels: &[Color32]) -> Color32 {
+        let mut counts = std::collections::HashMap::new();
+        for pixel in pixels.iter().step_by(17) {
+            *counts.entry(*pixel).or_insert(0usize) += 1;
+        }
+        counts.into_iter().max_by_key(|(_, n)| *n).unwrap().0
+    }
+
+    fn table_text(lines: usize) -> String {
+        let rows = [
+            "港島區\t太古城32\t35\t-8.6%\t11,996\t13,780\t1.6%\t86%",
+            "\t杏花邨24\t16\t50.0%\t9,974\t11,847\t-0.3%\t84%",
+            "\t海怡半島\t15\t16\t-6.3%\t9,648\t12,084\t-2.6%\t80%",
+            "\t寶翠園1\t3\t-66.7%\t14,055\t18,332\t2.6%\t77%",
+            "\t置富花園\t9\t6\t50.0%\t9,543\t11,261\t30.4%\t85%",
+            "九龍區\t美孚新邨\t35\t34\t2.9%\t7,368\t9,833\t3.5%\t75%",
+            "\t麗港城21\t26\t-19.2%\t7,945\t9,921\t2.0%\t80%",
+            "\t黃埔花園\t21\t28\t-25.0%\t9,986\t11,606\t1.9%\t86%",
+            "新界區\t嘉湖山莊\t58\t77\t-24.7%\t5,036\t6,525\t4.4%\t77%",
+        ];
+        rows.iter()
+            .cycle()
+            .take(lines)
+            .fold(String::new(), |mut text, row| {
+                text.push_str(row);
+                text.push('\n');
+                text
+            })
+    }
+
+    #[test]
+    #[ignore = "requires an interactive desktop; samples only the test window's own pixels"]
+    fn repeated_native_redraws_never_show_half_painted_text() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let mut fixture = VisibleFixture::new(&table_text(60));
+        let baseline = fixture.shown();
+        let background = dominant_color(&baseline);
+        let ink: Vec<usize> = (0..baseline.len())
+            .filter(|&i| color_distance(baseline[i], background) >= 48)
+            .collect();
+        assert!(
+            ink.len() > 2_000,
+            "baseline shows text: {} ink pixels",
+            ink.len()
+        );
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let sampler = {
+            let (stop, ink) = (stop.clone(), ink.clone());
+            let hwnd = fixture.hwnd() as usize;
+            let (width, height) = fixture.size();
+            std::thread::spawn(move || {
+                let (mut samples, mut bad, mut worst) = (0usize, 0usize, 0usize);
+                while !stop.load(Ordering::Acquire) {
+                    let Some(pixels) = displayed_pixels(hwnd, width, height) else {
+                        continue;
+                    };
+                    samples += 1;
+                    let missing = ink
+                        .iter()
+                        .filter(|&&i| color_distance(pixels[i], background) <= 16)
+                        .count();
+                    worst = worst.max(missing);
+                    bad += usize::from(missing > 8);
+                }
+                (samples, bad, worst)
+            })
+        };
+        // Each request re-applies the current position: exactly what a wheel
+        // notch over a thumb already at its end does in the application.
+        let started = Instant::now();
+        let mut redraws = 0;
+        while started.elapsed() < Duration::from_secs(3) {
+            fixture.editors.editors[0].scroll_to(0.0);
+            fixture.frame();
+            redraws += 1;
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        stop.store(true, Ordering::Release);
+        let (samples, bad, worst) = sampler.join().unwrap();
+        eprintln!("redraws={redraws} samples={samples} half_painted={bad} worst_missing={worst}");
+        assert!(samples > 100, "sampler ran: {samples}");
+        assert_eq!(
+            bad, 0,
+            "{bad}/{samples} samples showed text erased mid-paint (worst {worst} ink pixels)"
+        );
+        assert!(
+            fixture.shown() == baseline,
+            "the final frame is the complete text"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires an interactive desktop; samples only the test window's own pixels"]
+    fn buffered_paint_keeps_selection_highlight_and_scrolled_view() {
+        let mut fixture = VisibleFixture::new(&table_text(60));
+        let plain = fixture.shown();
+        let background = dominant_color(&plain);
+        // ES_NOHIDESEL keeps the highlight without focus. Select the first two lines.
+        // SAFETY: Select UTF-16 text in this test-owned RichEdit child only.
+        unsafe { SendMessageW(fixture.hwnd(), 0xB1, 0, 80) };
+        fixture.frame();
+        let selected = fixture.shown();
+        let highlighted = selected
+            .iter()
+            .zip(&plain)
+            .filter(|(now, before)| {
+                color_distance(**before, background) <= 8 && color_distance(**now, background) > 24
+            })
+            .count();
+        assert!(
+            highlighted > 2_000,
+            "selection highlight is painted: {highlighted} pixels"
+        );
+        // SAFETY: Clear the selection in this test-owned child only.
+        unsafe { SendMessageW(fixture.hwnd(), 0xB1, 0, 0) };
+        fixture.frame();
+        assert!(
+            fixture.shown() == plain,
+            "clearing the selection restores the text"
+        );
+        fixture.editors.editors[0].scroll_to(200.0);
+        fixture.frame();
+        let scrolled = fixture.shown();
+        assert_eq!(fixture.editors.scroll_positions()[0].1, 200);
+        assert!(
+            scrolled != plain,
+            "the scrolled view is painted, not a stale copy"
+        );
+        assert!(
+            scrolled
+                .iter()
+                .filter(|pixel| color_distance(**pixel, background) >= 48)
+                .count()
+                > 2_000,
+            "the scrolled view shows text"
+        );
     }
 
     #[test]
