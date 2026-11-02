@@ -1,5 +1,15 @@
 # 当前变更说明
 
+## 2026-11-02 2.1.1 版本与更新说明同步（本地重打包，未发布）
+
+README 新增独立的源码版本徽章与「当前源码版本：2.1.1」，与跟随 GitHub 公开发布的 Release 徽章分开显示。2.1.1 更新日志补齐结构化表格、合并单元格与多格式复制、长数字文本保护、系统 DLL 加载加固、清单版本自动生成及打包脚本改进；安装说明同步更新，移除「2.0.0 用户升级到 2.0.1」的过时指引。本轮只更新文档，程序功能未改动。
+
+- 在 `C:\dev\sightocr` 运行 `scripts/build.ps1 -Installer -Toolchain 1.97.0-x86_64-pc-windows-msvc`，未设置外部 `CARGO_TARGET_DIR`：格式检查、严格 Clippy、串行默认测试通过（253 项通过、25 项显式忽略、0 项失败），随后完成 release 构建与打包。未启用 `private-table-samples`，本轮未重跑私有表格专项测试。
+- 提交前核对 `Cargo.toml`、`Cargo.lock` 的 sightocr 包条目、README 源码徽章 / 当前版本 / 更新日志、安装说明均为 2.1.1；三个 EXE 的文件版本和产品版本为 2.1.1，嵌入清单为 2.1.1.0，CLI `--version` 输出 `sightocr-cli 2.1.1`。
+- 只读解析安装包索引、验证整体数据 SHA-256，并逐个解压校验内置的 11 个文件，与 `dist/SightOCR` 逐字节一致。包内 README 与源码按打包规则过滤开发文档链接后的内容一致，三份使用文档与源码一致；`SHA256SUMS.txt` 三条校验值均匹配实际文件。三个 EXE 的 Dependent Load Flag 均为 `0x800`。
+- 当前本地安装包：`dist/installer/SightOCR-Setup-2.1.1.exe`；SHA-256：`DF6A5C43BA1EB6E6CF452BD764D24063F717DFE75657694B957E2A3C8A1D96FD`。本轮替换此前 `640C3EC4…0132` 的同版本构建，旧包与文档已备份到 `target/version-sync-20261102-205618/`。
+- 验证日志和逐文件核对结果在上述备份目录内。未执行 GitHub CI、推送、标签或公开发布；本轮未运行真实 UAC 安装、界面手动复制、Office 粘贴或真实云端服务测试。
+
 ## 2026-11-02 表格合并单元格与多格式复制（未发布）
 
 表格识别结果新增结构化模型 `document::Table`：网格内容与 TSV 完全一致，另记录合并单元格。本地表格由缺失的内部线条与文字落位推断合并，百度、腾讯表格直接采用接口返回的跨度。模型经识别子进程传到界面；结果未修改时，复制同时写入 CF_UNICODETEXT（TSV）与 HTML Format（rowspan/colspan，12 位以上或以 0 开头的数字设为文本）。只存合并单元格，26 万格的稀疏表格序列化后仍小于 1 MiB，远低于 16 MiB 的进程间消息上限。验证环境：Windows 11 build 26300、`1.97.0-x86_64-pc-windows-msvc`；Documents 受「受控文件夹访问」保护，`CARGO_TARGET_DIR` 设在仓库外。

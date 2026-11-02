@@ -8,7 +8,8 @@
 
 框选屏幕即可识别文字、表格和公式，一键翻译并复制。本地离线识别，也可接入百度、腾讯与各类大模型接口。
 
-[![Release](https://img.shields.io/github/v/release/FueTsui/SightOCR?label=%E4%B8%8B%E8%BD%BD)](https://github.com/FueTsui/SightOCR/releases/latest)
+![Source Version](https://img.shields.io/badge/source-v2.1.1-blue)
+[![Release](https://img.shields.io/github/v/release/FueTsui/SightOCR?label=release)](https://github.com/FueTsui/SightOCR/releases/latest)
 [![CI](https://github.com/FueTsui/SightOCR/actions/workflows/rust.yml/badge.svg)](https://github.com/FueTsui/SightOCR/actions/workflows/rust.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-0078D4)
@@ -17,6 +18,8 @@
 [下载](https://github.com/FueTsui/SightOCR/releases/latest) · [使用说明](docs/USAGE.md) · [安装与升级](docs/INSTALLATION.md) · [CLI 与 Skill](docs/CLI.md)
 
 </div>
+
+**当前源码版本：2.1.1**（已在本地打包，尚未公开发布）。下载入口与 Release 徽章指向 GitHub 上最新的公开版本，可能与当前源码版本不同。
 
 <p align="center">
   <img src="docs/screenshots/2.1.0/result.png" width="40%" alt="识别结果">
@@ -41,6 +44,8 @@
 ## 📥 安装
 
 从 [Releases](https://github.com/FueTsui/SightOCR/releases/latest) 下载 `SightOCR-Setup-<版本号>.exe` 并运行。
+
+本地构建的 2.1.1 安装包位于 `dist/installer/SightOCR-Setup-2.1.1.exe`，校验值见同目录的 `SHA256SUMS.txt`。同为 2.1.1 的不同构建请按校验值区分；同版本覆盖安装需手动运行安装包。
 
 - 系统要求：Windows 10 / 11 x64
 - 默认安装到 `C:\Program Files\SightOCR`，覆盖安装会保留设置、密钥与快捷方式
@@ -195,11 +200,15 @@ resources/oneocr/      OneOCR DLL 与模型（不随源码提供）
 ## 📝 更新日志
 
 **2.1.1**
+- 表格识别保留合并单元格：本地推断跨度，百度、腾讯采用接口返回的跨度；未经编辑的原文复制时同时提供 TSV 与 HTML，粘贴到 Excel、Word 可还原合并单元格。12 位及以上或以 0 开头的纯数字保持为文本，编辑后复制仍使用纯文本。
 - AI 调用方式由 MCP 服务改为命令行程序 `sightocr-cli.exe` 与配套 Skill：每次调用执行完即退出，不再常驻后台，安装和更新时不会因服务占用程序文件而失败。
 - 新增 `providers` 命令，列出可用的翻译服务与默认设置；`--json` 输出 ASCII 转义的 JSON，`-o` 写入 UTF-8 文件，翻译原文可从 `--text`、`--file`（UTF-8 / UTF-16）或标准输入读取。
 - 升级时删除旧的 `sightocr-mcp.exe`；旧 MCP 服务运行时，程序内更新会提示先停止服务。请从 AI 客户端配置中删除 `sightocr` MCP 服务，并重新复制 Skill。
 - 安装包检测到已安装时，窗口底部右侧提供「卸载」，直接打开已安装版本的卸载程序；版本号移到名称下方居中显示。
 - 修复卸载完成页停留超过 1 分钟时，卸载程序要等重启后才能删除的问题。
+- 加固 Windows 系统 DLL 加载：MSVC 发布构建限制静态依赖从 System32 加载，降低安装包同目录 DLL 劫持风险；静态链接 C 运行库，无需另装 VC++ 运行库。
+- 清单版本由 `Cargo.toml` 自动生成，EXE 版权声明与 MIT 许可一致；缺少本地模型的测试明确报告为忽略。
+- 打包脚本支持 `CARGO_TARGET_DIR`，校验清单不再使用 `../` 路径。
 
 **2.1.0**
 - 原 Mistral、OpenAI、NVIDIA 固定接口统一为可自定义名称的「模型接口」，支持五种标准协议，用于识别（文字 / 表格 / 公式）与翻译；旧配置自动迁移。
