@@ -1,6 +1,7 @@
 use crate::{
     config::Config,
-    ocr::{OneOcr, Recognition},
+    document::Table,
+    ocr::{OneOcr, Recognition, Recognized},
     services::Services,
 };
 use anyhow::{Context, Result};
@@ -29,6 +30,9 @@ pub struct Request {
 pub struct Output {
     pub id: u64,
     pub recognized: Option<String>,
+    /// Tables that `recognized` renders as TSV, for richer clipboard copies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<Table>,
     pub translated: Option<String>,
     pub warning: Option<String>,
     pub error: Option<String>,
@@ -71,14 +75,14 @@ impl Engine {
         Ok(self.services.as_mut().expect("services initialized"))
     }
 
-    fn local(&mut self, image: &RgbaImage, mode: Recognition) -> Result<String> {
+    fn local(&mut self, image: &RgbaImage, mode: Recognition) -> Result<Recognized> {
         if self.local.is_none() {
             self.local = Some(OneOcr::new(&self.resources)?);
         }
         self.local
             .as_mut()
             .expect("OCR initialized")
-            .recognize(image, mode)
+            .recognize_document(image, mode)
     }
 
     pub fn execute(&mut self, request: Request, output: &mut Output) -> Result<()> {
@@ -146,19 +150,19 @@ impl Engine {
                     warning: None,
                 });
                 anyhow::ensure!(!cancelled(), "任务已取消");
-                let text = if is_cloud_ocr(selection) {
+                let recognized = if is_cloud_ocr(selection) {
                     let mut png = Cursor::new(Vec::new());
                     image.write_to(&mut png, image::ImageFormat::Png)?;
                     anyhow::ensure!(!cancelled(), "任务已取消");
-                    match self.services()?.ocr_cancellable(
+                    match self.services()?.ocr_document_cancellable(
                         png.get_ref(),
                         selection,
                         &config,
                         &cancelled,
                     ) {
-                        Ok(text) => {
+                        Ok(recognized) => {
                             positioned = false;
-                            text
+                            recognized
                         }
                         Err(error) => {
                             anyhow::ensure!(!cancelled(), "任务已取消");
@@ -178,9 +182,13 @@ impl Engine {
                 } else {
                     self.local(&image, mode)?
                 };
-                anyhow::ensure!(!text.trim().is_empty(), "未识别到文字，请选择更清晰的区域");
-                let text = normalize_text(&text, layout && !positioned);
+                anyhow::ensure!(
+                    !recognized.text.trim().is_empty(),
+                    "未识别到文字，请选择更清晰的区域"
+                );
+                let text = normalize_text(&recognized.text, layout && !positioned);
                 output.recognized = Some(text.clone());
+                output.tables = recognized.tables;
                 if translate {
                     anyhow::ensure!(!cancelled(), "任务已取消");
                     progress(Progress {

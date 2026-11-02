@@ -23,6 +23,7 @@ use windows_sys::Win32::System::LibraryLoader::{
 
 mod layout;
 mod table;
+use crate::document::Table;
 pub mod text;
 
 pub use layout::paragraphs_from_text;
@@ -305,6 +306,15 @@ impl OneOcr {
     }
 
     pub fn recognize(&mut self, image: &RgbaImage, mode: Recognition) -> Result<String> {
+        Ok(self.recognize_document(image, mode)?.text)
+    }
+
+    /// Recognize text; table mode also returns the table with its merged cells.
+    pub fn recognize_document(
+        &mut self,
+        image: &RgbaImage,
+        mode: Recognition,
+    ) -> Result<Recognized> {
         let table = mode == Recognition::Table;
         let positioned = mode != Recognition::Text;
         let (pixels, width, height, input_scale) = prepare_recognition_bgra(image, table)?;
@@ -419,7 +429,13 @@ impl OneOcr {
             });
         }
         Ok(match mode {
-            Recognition::Table => table::reconstruct(&lines, &image),
+            Recognition::Table => {
+                let table = table::reconstruct_model(&lines, &image);
+                Recognized {
+                    text: table.to_tsv(),
+                    tables: vec![table],
+                }
+            }
             Recognition::Layout => {
                 // Level the boxes of a tilted capture so rows and indents compare.
                 if let Some(rects) = table::level_boxes(&image, &quads) {
@@ -427,10 +443,26 @@ impl OneOcr {
                         line.rect = rect;
                     }
                 }
-                layout::analyze(&lines)
+                Recognized::text(layout::analyze(&lines))
             }
-            Recognition::Text => texts.join("\n"),
+            Recognition::Text => Recognized::text(texts.join("\n")),
         })
+    }
+}
+
+/// Recognized text, plus the tables it renders when recognition kept structure.
+#[derive(Debug, Default)]
+pub struct Recognized {
+    pub text: String,
+    pub tables: Vec<Table>,
+}
+
+impl Recognized {
+    pub fn text(text: String) -> Self {
+        Self {
+            text,
+            tables: Vec::new(),
+        }
     }
 }
 

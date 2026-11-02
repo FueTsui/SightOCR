@@ -2,6 +2,8 @@
 //! Provider selection is explicit: a failed request never sends data to another provider.
 
 use crate::config::{normalize_language, Config, ProxyConfig, ProxyMode};
+use crate::document::{tables_tsv, Table, TableCell};
+use crate::ocr::Recognized;
 use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::{TimeZone, Utc};
@@ -201,12 +203,25 @@ impl Services {
         config: &Config,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<String> {
+        Ok(self
+            .ocr_document_cancellable(png, selection, config, cancelled)?
+            .text)
+    }
+
+    /// Like `ocr_cancellable`; table modes also return the tables with merges.
+    pub fn ocr_document_cancellable(
+        &mut self,
+        png: &[u8],
+        selection: &str,
+        config: &Config,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Recognized> {
         let result = self.ocr_task(png, selection, config, cancelled);
         self.note_failure(&result);
         result
     }
 
-    fn note_failure(&mut self, result: &Result<String>) {
+    fn note_failure<T>(&mut self, result: &Result<T>) {
         if result.as_ref().is_err_and(is_network_error) {
             self.reconnect = true;
         }
@@ -218,14 +233,16 @@ impl Services {
         selection: &str,
         config: &Config,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<String> {
+    ) -> Result<Recognized> {
         anyhow::ensure!(!cancelled(), "任务已取消");
         self.configure_proxy(&config.proxy)?;
         if png.is_empty() {
             return Err(ServiceError::InvalidInput("待识别图片为空".into()).into());
         }
         if selection.starts_with(crate::config::MODEL_SELECTION_PREFIX) {
-            return self.ai_ocr(png, selection, config, cancelled);
+            return self
+                .ai_ocr(png, selection, config, cancelled)
+                .map(Recognized::text);
         }
         if let Some(mode) = selection.strip_prefix("Baidu_") {
             require_credentials(&config.api_key, &config.secret_key, "百度 OCR")?;
@@ -273,7 +290,7 @@ impl Services {
                         continue;
                     }
                 }
-                return parse_baidu_ocr(&value, endpoint);
+                return parse_baidu_document(&value, endpoint);
             }
             unreachable!("the second attempt always returns")
         } else if let Some(mode) = selection.strip_prefix("Tencent_") {
@@ -304,7 +321,7 @@ impl Services {
                 action,
                 &body,
             )?;
-            parse_tencent_ocr(&value, mode)
+            parse_tencent_document(&value, mode)
         } else {
             Err(
                 ServiceError::InvalidInput("本地 OCR 应由本地引擎处理，未发送云端请求".into())
@@ -879,7 +896,12 @@ pub(super) fn display_math(text: &str) -> Option<String> {
     (!latex.is_empty()).then(|| format!("\\[\n{latex}\n\\]"))
 }
 
+#[cfg(test)]
 fn parse_baidu_ocr(value: &Value, mode: &str) -> Result<String> {
+    Ok(parse_baidu_document(value, mode)?.text)
+}
+
+fn parse_baidu_document(value: &Value, mode: &str) -> Result<Recognized> {
     baidu_response(value, "百度 OCR")?;
     match mode {
         "table" => parse_tables(
@@ -888,12 +910,17 @@ fn parse_baidu_ocr(value: &Value, mode: &str) -> Result<String> {
             "body",
             ["row_start", "col_start", "row_end", "col_end", "words"],
         ),
-        "formula" => formula_field(value, "formula_result", "words"),
-        _ => joined_field(value, "words_result", "words", "\n"),
+        "formula" => formula_field(value, "formula_result", "words").map(Recognized::text),
+        _ => joined_field(value, "words_result", "words", "\n").map(Recognized::text),
     }
 }
 
+#[cfg(test)]
 fn parse_tencent_ocr(value: &Value, mode: &str) -> Result<String> {
+    Ok(parse_tencent_document(value, mode)?.text)
+}
+
+fn parse_tencent_document(value: &Value, mode: &str) -> Result<Recognized> {
     let response = tencent_response(value)?;
     match mode {
         "table" => parse_tables(
@@ -902,12 +929,19 @@ fn parse_tencent_ocr(value: &Value, mode: &str) -> Result<String> {
             "Cells",
             ["RowTl", "ColTl", "RowBr", "ColBr", "Text"],
         ),
-        "formula" => formula_field(response, "FormulaInfoList", "DetectedText"),
-        _ => joined_field(response, "TextDetections", "DetectedText", "\n"),
+        "formula" => {
+            formula_field(response, "FormulaInfoList", "DetectedText").map(Recognized::text)
+        }
+        _ => joined_field(response, "TextDetections", "DetectedText", "\n").map(Recognized::text),
     }
 }
 
-fn parse_tables(value: &Value, array: &str, cells_key: &str, keys: [&str; 5]) -> Result<String> {
+fn parse_tables(
+    value: &Value,
+    array: &str,
+    cells_key: &str,
+    keys: [&str; 5],
+) -> Result<Recognized> {
     let tables = value
         .get(array)
         .and_then(Value::as_array)
@@ -915,7 +949,7 @@ fn parse_tables(value: &Value, array: &str, cells_key: &str, keys: [&str; 5]) ->
     if tables.len() > MAX_TABLES {
         return Err(ServiceError::InvalidResponse("表格数量超过限制").into());
     }
-    let mut output = Vec::new();
+    let mut output: Vec<Table> = Vec::new();
     let mut total_cells = 0usize;
     for table in tables {
         let cells_value = table
@@ -955,7 +989,7 @@ fn parse_tables(value: &Value, array: &str, cells_key: &str, keys: [&str; 5]) ->
             }
             rows = rows.max(row_end);
             cols = cols.max(col_end);
-            parsed.push((row, col, required_str(cell, keys[4])?));
+            parsed.push((row, col, row_end, col_end, required_str(cell, keys[4])?));
         }
         // Both providers number grid boundaries, so end indices are exclusive.
         let size = rows
@@ -967,22 +1001,27 @@ fn parse_tables(value: &Value, array: &str, cells_key: &str, keys: [&str; 5]) ->
         if total_cells > MAX_TABLE_CELLS {
             return Err(ServiceError::InvalidResponse("表格总尺寸超过限制").into());
         }
-        let mut grid = vec![String::new(); size];
-        for (row, col, text) in parsed {
-            let destination = &mut grid[row * cols + col];
+        let mut grid = vec![vec![String::new(); cols]; rows];
+        let mut merges = Vec::with_capacity(parsed.len());
+        for (row, col, row_end, col_end, text) in parsed {
+            let destination = &mut grid[row][col];
             if !destination.is_empty() && !text.is_empty() {
                 destination.push(' ');
             }
             destination.push_str(&text.replace(['\r', '\n', '\t'], " "));
+            merges.push(TableCell {
+                row,
+                col,
+                row_span: row_end - row,
+                col_span: col_end - col,
+            });
         }
-        output.push(
-            grid.chunks(cols)
-                .map(|row| row.join("\t"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        );
+        output.push(Table::new(Vec::new(), Vec::new(), grid, merges));
     }
-    Ok(output.join("\n\n"))
+    Ok(Recognized {
+        text: tables_tsv(&output),
+        tables: output,
+    })
 }
 
 fn parse_baidu_translation(value: &Value) -> Result<String> {
@@ -1181,6 +1220,18 @@ mod tests {
             {"row_start":1,"row_end":2,"col_start":1,"col_end":2,"words":"C"}
         ]}]});
         assert_eq!(parse_baidu_ocr(&value, "table")?, "标题\t\nA B\tC");
+        // The provider's own merge reaches the clipboard's HTML table.
+        let document = parse_baidu_document(&value, "table")?;
+        assert_eq!(tables_tsv(&document.tables), document.text);
+        assert_eq!(
+            document.tables[0].merges,
+            [TableCell {
+                row: 0,
+                col: 0,
+                row_span: 1,
+                col_span: 2,
+            }]
+        );
         let value = json!({"Response":{"TableDetections":[{"Cells":[
             {"RowTl":0,"RowBr":1,"ColTl":0,"ColBr":1,"Text":"唯一单元格"}
         ]}]}});

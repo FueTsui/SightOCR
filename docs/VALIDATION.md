@@ -1,5 +1,14 @@
 # 当前变更说明
 
+## 2026-11-02 表格合并单元格与多格式复制（未发布）
+
+表格识别结果新增结构化模型 `document::Table`：网格内容与 TSV 完全一致，另记录合并单元格。本地表格由缺失的内部线条与文字落位推断合并，百度、腾讯表格直接采用接口返回的跨度。模型经识别子进程传到界面；结果未修改时，复制同时写入 CF_UNICODETEXT（TSV）与 HTML Format（rowspan/colspan，12 位以上或以 0 开头的数字设为文本）。只存合并单元格，26 万格的稀疏表格序列化后仍小于 1 MiB，远低于 16 MiB 的进程间消息上限。验证环境：Windows 11 build 26300、`1.97.0-x86_64-pc-windows-msvc`；Documents 受「受控文件夹访问」保护，`CARGO_TARGET_DIR` 设在仓库外。
+
+- 格式检查、严格 Clippy（默认与 `private-table-samples` 两种配置）通过；`cargo test --locked --features private-table-samples -- --test-threads=1` 264 项通过、25 项显式忽略、0 项失败。
+- 9 张私有样本：TSV 与改动前逐字一致；人工标注的 45 处合并识别出 43 处，table3 表头 2 处因竖线过淡偏一格（固定为已知差异），其余标注表格无多余合并。
+- 用 Rust 写剪贴板的临时探针，配合 Excel、Word（COM，隐藏实例，不保存）粘贴：table3 的 7 处合并在 Excel 中逐一一致；身份证号、银行卡号、`00123` 保持文本，金额仍为数值；Word 粘贴为 19 行、145 格的非均匀表格。测试前后剪贴板全部可读格式已恢复，无遗留 Office 进程。
+- 未覆盖：在运行中的 SightOCR 界面里手动复制（界面冒烟测试只记录复制文本）、WPS 与 LibreOffice、云端表格的真实接口返回、多张云端表格一次粘贴。
+
 ## 2026-11-02 审计修复：DLL 加载加固与测试如实报告（未发布）
 
 审计发现：GNU 工具链构建的安装包以管理员权限从「下载」或 `%TEMP%` 运行时，会先从自身目录加载 `dwmapi.dll`、`uxtheme.dll`、`opengl32.dll` 等非 KnownDLLs 系统库（CWE-427）。本次改为 MSVC 构建，并为所有程序设置 `/DEPENDENTLOADFLAG:0x800`、静态链接 CRT。同时：缺少 OneOCR 资源时 CLI 模型测试改为显式忽略；`app.manifest` 版本由 `build.rs` 按 `Cargo.toml` 生成（原为过时的 2.0.3.0）；EXE 版权由「All rights reserved」改为 MIT 声明；`SHA256SUMS.txt` 不再使用 `../` 路径。验证环境：Windows 11 build 26300、`1.97.0-x86_64-pc-windows-msvc`、MSVC 链接器 14.44。

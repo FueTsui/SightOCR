@@ -3,6 +3,7 @@ use eframe::egui::{self, ViewportCommand};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use sightocr::{
     config::{Config, LANGUAGES},
+    document::{self, Table},
     platform::{self, Platform, PlatformEvent, SingleInstance},
     updater::{PreparedUpdate, UpdateInfo, UpdateProgress},
     worker::{self, Output, Progress, ProgressStage, Request, Task, Worker},
@@ -175,6 +176,8 @@ struct App {
     focus_source: bool,
     focus_translation: bool,
     source_image_size: Option<(u32, u32)>,
+    /// Tables behind the recognized text; copied as HTML while the text is unedited.
+    source_tables: Vec<Table>,
     pending_image_size: Option<(u32, u32)>,
     source: String,
     translation: String,
@@ -333,6 +336,7 @@ impl App {
             focus_source: false,
             focus_translation: false,
             source_image_size: None,
+            source_tables: Vec::new(),
             pending_image_size: None,
             source: String::new(),
             translation: String::new(),
@@ -580,6 +584,7 @@ impl App {
                     .into();
                     if let Some(source) = progress.recognized {
                         self.source = source;
+                        self.source_tables.clear();
                         self.source_image_size = self.pending_image_size;
                         self.translation.clear();
                     }
@@ -680,6 +685,7 @@ impl App {
                     if let Some(text) = output.recognized {
                         self.compact_result_tab = 0;
                         self.source = text;
+                        self.source_tables = output.tables;
                         self.source_image_size = image_size;
                         self.translation.clear();
                     }
@@ -792,6 +798,14 @@ impl App {
         if let Some(copies) = &self.smoke_copies {
             copies.borrow_mut().push(text);
             return;
+        }
+        // Unedited table text also goes out as HTML so spreadsheets and word
+        // processors keep merged cells and ID numbers; anything else is plain.
+        if !self.source_tables.is_empty() && document::tables_tsv(&self.source_tables) == text {
+            let html = document::tables_html(&self.source_tables);
+            if platform::copy_text_and_html(self.hwnd, &text, &html).is_ok() {
+                return;
+            }
         }
         ctx.copy_text(text);
     }

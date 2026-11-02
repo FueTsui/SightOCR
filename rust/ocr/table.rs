@@ -2,6 +2,7 @@
 //! This deliberately has no OpenCV, NumPy or clustering runtime dependency.
 
 use super::BoundingBox;
+use crate::document::{Table, TableCell};
 use anyhow::{ensure, Result};
 use image::RgbaImage;
 
@@ -58,18 +59,23 @@ pub(super) struct TextLine {
     pub rect: Rect,
 }
 
+#[cfg(test)]
 pub(super) fn reconstruct(lines: &[TextLine], image: &RgbaImage) -> String {
+    reconstruct_model(lines, image).to_tsv()
+}
+
+pub(super) fn reconstruct_model(lines: &[TextLine], image: &RgbaImage) -> Table {
     reconstruct_pass(lines, image, true)
 }
 
-fn reconstruct_pass(lines: &[TextLine], image: &RgbaImage, correct_keystone: bool) -> String {
+fn reconstruct_pass(lines: &[TextLine], image: &RgbaImage, correct_keystone: bool) -> Table {
     let mut ordered: Vec<_> = lines
         .iter()
         .filter(|line| !line.text.trim().is_empty())
         .collect();
     drop_duplicate_lines(&mut ordered);
     if ordered.is_empty() {
-        return String::new();
+        return Table::default();
     }
     ordered.sort_by(|a, b| {
         a.rect
@@ -143,7 +149,7 @@ fn reconstruct_pass(lines: &[TextLine], image: &RgbaImage, correct_keystone: boo
         }
         ordered.retain(|line| inside(frame, line));
         if ordered.is_empty() {
-            return String::new();
+            return Table::default();
         }
         bounds.top = ordered
             .iter()
@@ -206,21 +212,102 @@ fn reconstruct_pass(lines: &[TextLine], image: &RgbaImage, correct_keystone: boo
     let populated: Vec<_> = (0..columns.len() + 1)
         .filter(|&c| grid.iter().any(|r| !r[c].is_empty()))
         .collect();
-    let table = grid
+    let (first, last) = (*populated.first().unwrap(), *populated.last().unwrap());
+    let kept: Vec<usize> = (0..grid.len())
+        .filter(|&r| grid[r].iter().any(|cell| !cell.is_empty()))
+        .collect();
+    let cells = merged_cells(
+        &grid,
+        &columns,
+        &cuts,
+        &rules,
+        &active_columns,
+        bounds,
+        &kept,
+        first,
+        last,
+    );
+    let visible = kept
         .iter()
-        .filter(|row| row.iter().any(|cell| !cell.is_empty()))
-        .map(|row| {
-            (*populated.first().unwrap()..=*populated.last().unwrap())
-                .map(|c| row[c].as_str())
-                .collect::<Vec<_>>()
-                .join("\t")
-        });
-    outside_rows(&above, height)
-        .into_iter()
-        .chain(table)
-        .chain(outside_rows(&below, height))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .map(|&r| (first..=last).map(|c| grid[r][c].clone()).collect())
+        .collect();
+    Table::new(
+        outside_rows(&above, height),
+        outside_rows(&below, height),
+        visible,
+        cells,
+    )
+}
+
+/// Derive merge extents from the same evidence that anchors merged text:
+/// inactive column separators join cells across, and row boundaries that are
+/// neither inferred nor drawn at a column join cells down. Spans are
+/// given in the visible grid; `Table::new` trims any that would hide text.
+#[allow(clippy::too_many_arguments)]
+fn merged_cells(
+    grid: &[Vec<String>],
+    columns: &[f32],
+    cuts: &[RowBoundary],
+    rules: &RuleSet,
+    active_columns: &[Vec<bool>],
+    bounds: Rect,
+    kept: &[usize],
+    first: usize,
+    last: usize,
+) -> Vec<TableCell> {
+    let rows = grid.len();
+    let cols = columns.len() + 1;
+    let center = |c: usize| {
+        let left = if c == 0 { bounds.left } else { columns[c - 1] };
+        let right = if c == columns.len() {
+            bounds.right
+        } else {
+            columns[c]
+        };
+        (left + right) / 2.0
+    };
+    let open_below = |r: usize, c: usize| {
+        !cuts[r].inferred && !covers(&rules.horizontal, cuts[r].position, center(c))
+    };
+    let mut covered = vec![vec![false; cols]; rows];
+    let mut cells = Vec::new();
+    for r in 0..rows {
+        for c in 0..cols {
+            if covered[r][c] {
+                continue;
+            }
+            let mut col_span = 1;
+            while c + col_span < cols && !active_columns[r][c + col_span - 1] {
+                col_span += 1;
+            }
+            let mut row_span = 1;
+            while r + row_span < rows
+                && (c..c + col_span).all(|cc| open_below(r + row_span - 1, cc))
+                && (c..c + col_span - 1).all(|j| !active_columns[r + row_span][j])
+                && (c..c + col_span).all(|cc| !covered[r + row_span][cc])
+            {
+                row_span += 1;
+            }
+            for row in &mut covered[r..r + row_span] {
+                row[c..c + col_span].fill(true);
+            }
+            // Map onto the visible grid: empty rows and outer empty columns are dropped.
+            let visible_rows: Vec<usize> = (r..r + row_span)
+                .filter_map(|rr| kept.iter().position(|&k| k == rr))
+                .collect();
+            let (c0, c1) = (c.max(first), (c + col_span - 1).min(last));
+            if visible_rows.is_empty() || c0 > c1 {
+                continue;
+            }
+            cells.push(TableCell {
+                row: visible_rows[0],
+                col: c0 - first,
+                row_span: visible_rows.len(),
+                col_span: c1 - c0 + 1,
+            });
+        }
+    }
+    cells
 }
 
 struct DiagonalHeader<'a> {

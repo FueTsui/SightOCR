@@ -1,6 +1,8 @@
 //! Real images plus frozen OCR boxes; expected structure was checked separately.
 //! Set SIGHTOCR_TABLE_SAMPLE_DUMP=1 to inspect TSVs without changing the fixtures.
-use super::{group_text_rows, infer_columns, reconstruct, straighten, Rect, TextLine};
+use super::{
+    group_text_rows, infer_columns, reconstruct, reconstruct_model, straighten, Rect, TextLine,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
@@ -496,4 +498,143 @@ fn table9_keystoned_photo_keeps_side_columns_and_notes() {
         2,
         "1、每周一上午大课间时间为升旗仪式。2、教职工在校工作时间按校规定执行。3、本表自2020年9月1日起执行。",
     );
+}
+
+fn sample_input(id: &str) -> (Vec<TextLine>, image::RgbaImage, Expected) {
+    let fixtures: Fixtures = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/table-lines/fixtures.json"
+    ))
+    .unwrap();
+    let mut expected: BTreeMap<String, Expected> = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/table-lines/sample-expectations.json"
+    ))
+    .unwrap();
+    let sample = fixtures
+        .samples
+        .into_iter()
+        .find(|sample| sample.id == id)
+        .unwrap();
+    let expected = expected.remove(id).unwrap();
+    assert_eq!(sample.input_scale, 2);
+    assert_eq!(sample.coordinates, "original_image");
+    let source = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(&sample.image)).unwrap();
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&source)),
+        sample.image_sha256,
+        "{id} original image changed"
+    );
+    let mut image = image::load_from_memory(&source).unwrap().into_rgba8();
+    assert_eq!(
+        [image.width(), image.height()],
+        expected.size,
+        "{id} image changed"
+    );
+    let quads: Option<Vec<_>> = sample
+        .lines
+        .iter()
+        .map(|line| line.quad.map(|quad| quad.map(|[x, y]| (x, y))))
+        .collect();
+    let mut lines: Vec<_> = sample
+        .lines
+        .into_iter()
+        .map(|line| {
+            assert!(
+                line.left.is_finite()
+                    && line.top.is_finite()
+                    && line.right.is_finite()
+                    && line.bottom.is_finite()
+            );
+            assert!(line.left <= line.right && line.top <= line.bottom);
+            TextLine {
+                text: line.text,
+                rect: Rect {
+                    left: line.left,
+                    top: line.top,
+                    right: line.right,
+                    bottom: line.bottom,
+                },
+            }
+        })
+        .collect();
+    if let Some((level, rects)) = quads.and_then(|quads| straighten(&image, &quads)) {
+        for (line, rect) in lines.iter_mut().zip(rects) {
+            line.rect = rect;
+        }
+        image = level;
+    }
+    (lines, image, expected)
+}
+
+fn a1(row: usize, col: usize) -> String {
+    let mut name = String::new();
+    let mut c = col + 1;
+    while c > 0 {
+        name.insert(0, (b'A' + ((c - 1) % 26) as u8) as char);
+        c = (c - 1) / 26;
+    }
+    format!("{name}{}", row + 1)
+}
+
+/// Merges derived from rules and text placement against the independently
+/// annotated merges. table3's header spans a cell whose rule is too faint to
+/// split, so two of its merges come out one cell off; every other annotated
+/// merge must be found exactly and without extra merges.
+#[test]
+fn derived_merges_match_annotations() {
+    let annotated: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/table-lines/sample-expectations.json"
+    ))
+    .unwrap();
+    let known_missing = ["F2:I2", "A3:B3"];
+    let known_extra = ["A2:B2", "F2:H2"];
+    let mut found_total = 0;
+    for id in [
+        "table1", "table2", "table3", "table4", "table5", "table6", "table7", "table8", "table9",
+    ] {
+        let (lines, image, _) = sample_input(id);
+        let table = reconstruct_model(&lines, &image);
+        assert_eq!(table.to_tsv(), reconstruct(&lines, &image), "{id}");
+        let offset = table.above.len();
+        let derived: Vec<String> = table
+            .merges
+            .iter()
+            .map(|c| {
+                let end = (c.row + c.row_span - 1, c.col + c.col_span - 1);
+                format!(
+                    "{}:{}",
+                    a1(c.row + offset, c.col),
+                    a1(end.0 + offset, end.1)
+                )
+            })
+            .collect();
+        let entry = &annotated[id];
+        let Some(expected) = entry["keyMerges"]
+            .as_array()
+            .or(entry["desiredVisualMerges"].as_array())
+        else {
+            continue;
+        };
+        let expected: Vec<&str> = expected
+            .iter()
+            .map(|v| v.as_str().unwrap().split(' ').next().unwrap())
+            .collect();
+        let missing: Vec<_> = expected
+            .iter()
+            .filter(|m| !derived.iter().any(|d| d == *m))
+            .collect();
+        let extra: Vec<_> = derived
+            .iter()
+            .filter(|d| !expected.contains(&d.as_str()))
+            .collect();
+        assert!(
+            missing.iter().all(|m| known_missing.contains(m)),
+            "{id} missing {missing:?}"
+        );
+        assert!(
+            extra.iter().all(|m| known_extra.contains(&m.as_str())),
+            "{id} extra {extra:?}"
+        );
+        found_total += expected.len() - missing.len();
+    }
+    assert_eq!(found_total, 43);
 }

@@ -24,6 +24,7 @@ rust/
 ├── setup/             自带安装程序，bin: SightOCR-Setup
 ├── app.rs             应用状态、任务与系统事件
 ├── config.rs          配置验证、迁移与原子保存
+├── document.rs        表格结果模型：网格、合并单元格，渲染为 TSV 与剪贴板 HTML
 ├── headless.rs        无界面识别与翻译
 ├── ocr.rs, ocr/       OneOCR FFI、COM 生命周期、表格恢复与版面分析
 ├── platform.rs, platform/  截图、热键、托盘、自启、单实例
