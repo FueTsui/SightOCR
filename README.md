@@ -19,7 +19,7 @@
 
 </div>
 
-**当前源码版本：2.1.1**（已在本地打包，尚未公开发布）。下载入口与 Release 徽章指向 GitHub 上最新的公开版本，可能与当前源码版本不同。
+**当前源码版本：2.1.1**。对应版本的安装包、便携包与校验文件见 [v2.1.1 Release](https://github.com/FueTsui/SightOCR/releases/tag/v2.1.1)；Release 徽章显示 GitHub 上最新的公开版本。
 
 <p align="center">
   <img src="docs/screenshots/2.1.0/result.png" width="40%" alt="识别结果">
@@ -209,6 +209,7 @@ resources/oneocr/      OneOCR DLL 与模型（不随源码提供）
 - 加固 Windows 系统 DLL 加载：MSVC 发布构建限制静态依赖从 System32 加载，降低安装包同目录 DLL 劫持风险；静态链接 C 运行库，无需另装 VC++ 运行库。
 - 清单版本由 `Cargo.toml` 自动生成，EXE 版权声明与 MIT 许可一致；缺少本地模型的测试明确报告为忽略。
 - 打包脚本支持 `CARGO_TARGET_DIR`，校验清单不再使用 `../` 路径。
+- 更新 CLI 的 UTF-16 解析实现，兼容新版 Rust 的严格 Clippy 检查，保留大小端、BOM 和非法输入校验。
 
 **2.1.0**
 - 原 Mistral、OpenAI、NVIDIA 固定接口统一为可自定义名称的「模型接口」，支持五种标准协议，用于识别（文字 / 表格 / 公式）与翻译；旧配置自动迁移。

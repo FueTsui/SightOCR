@@ -361,14 +361,9 @@ fn read_text(reader: impl Read, source: &str) -> Result<String> {
 
 fn decode(bytes: &[u8]) -> Result<String> {
     let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| -> Result<String> {
-        ensure!(
-            rest.len().is_multiple_of(2),
-            "UTF-16 text has an odd byte count"
-        );
-        let units: Vec<u16> = rest
-            .chunks_exact(2)
-            .map(|pair| unit([pair[0], pair[1]]))
-            .collect();
+        let (pairs, remainder) = rest.as_chunks::<2>();
+        ensure!(remainder.is_empty(), "UTF-16 text has an odd byte count");
+        let units: Vec<u16> = pairs.iter().copied().map(unit).collect();
         String::from_utf16(&units).context("Invalid UTF-16 text")
     };
     match bytes {
