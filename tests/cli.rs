@@ -197,14 +197,16 @@ fn usage_errors_exit_2_and_failures_exit_1() {
     assert!(ok(&output).contains("sightocr-cli ocr <image>"));
 }
 
+// build.rs sets `has_oneocr` only when the model files are present, so a run
+// without them reports this test as ignored instead of passed.
 #[test]
+#[cfg_attr(
+    not(has_oneocr),
+    ignore = "OneOCR model files are not in resources/oneocr (see tests/ExtractOCR.bat)"
+)]
 fn recognizes_a_table_with_the_local_model() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let resources = root.join("resources/oneocr");
-    if !resources.join("oneocr.onemodel").is_file() {
-        eprintln!("skipped: OneOCR model files are not in resources/oneocr");
-        return;
-    }
     let temp = tempfile::tempdir().unwrap();
     let image = root.join("tests/fixtures/basic.png");
     let mut cmd = command(

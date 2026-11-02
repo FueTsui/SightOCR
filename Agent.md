@@ -38,7 +38,7 @@ docs/                  使用、安装、CLI、UI 设计、重构与验证记录
 resources/oneocr/      OneOCR DLL 与模型（不随源码提供，已 gitignore）
 ```
 
-以下目录是生成物，不要手动编辑或依据它们判断源码：`target/`、`dist/`、`release/`。`src/managers/__pycache__` 是 Python 时代的残留，与当前代码无关。
+以下目录是生成物，不要手动编辑或依据它们判断源码：`target/`、`dist/`、`release/`。
 
 ## 常用命令
 
@@ -51,6 +51,8 @@ cargo clippy --locked --all-targets -- -D warnings      # 严格 Clippy
 cargo test --locked -- --test-threads=1                 # 默认测试（必须串行）
 cargo build --release --locked --bins                   # 发布构建
 ```
+
+工具链：日常开发可用任意 Windows 工具链，但发布构建必须用 MSVC（`build.ps1 -Toolchain <msvc 工具链>`，默认 `stable-x86_64-pc-windows-msvc`）。原因：`build.rs` 只在 MSVC 下加 `/DEPENDENTLOADFLAG:0x800`，`.cargo/config.toml` 为 MSVC 静态链接 CRT；`tests/pe_hardening.rs` 在非 MSVC 工具链下显示为忽略。`rust/app.manifest` 的 `@VERSION@` 由 `build.rs` 按 `Cargo.toml` 版本填入，不要手写版本号。
 
 打包：
 

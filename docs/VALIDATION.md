@@ -1,5 +1,16 @@
 # 当前变更说明
 
+## 2026-11-02 审计修复：DLL 加载加固与测试如实报告（未发布）
+
+审计发现：GNU 工具链构建的安装包以管理员权限从「下载」或 `%TEMP%` 运行时，会先从自身目录加载 `dwmapi.dll`、`uxtheme.dll`、`opengl32.dll` 等非 KnownDLLs 系统库（CWE-427）。本次改为 MSVC 构建，并为所有程序设置 `/DEPENDENTLOADFLAG:0x800`、静态链接 CRT。同时：缺少 OneOCR 资源时 CLI 模型测试改为显式忽略；`app.manifest` 版本由 `build.rs` 按 `Cargo.toml` 生成（原为过时的 2.0.3.0）；EXE 版权由「All rights reserved」改为 MIT 声明；`SHA256SUMS.txt` 不再使用 `../` 路径。验证环境：Windows 11 build 26300、`1.97.0-x86_64-pc-windows-msvc`、MSVC 链接器 14.44。
+
+- `scripts/build.ps1 -Installer -Toolchain 1.97.0-x86_64-pc-windows-msvc`：格式检查、严格 Clippy、串行默认测试 248 项通过、25 项显式忽略、0 项失败（新增 2 项 PE 加固测试）。未启用 `private-table-samples`，未使用 `-SkipOptionalFontTests`。
+- dumpbin 确认 `SightOCR.exe`、`sightocr-cli.exe`、`SightOCR-Setup-2.1.1.exe` 的 Dependent Load Flag 均为 `0x800`，且不导入 `VCRUNTIME*`、`api-ms-win-crt-*`；清单版本为 `2.1.1.0`。
+- 植入测试：在 CLI 同目录放置伪造的 `bcrypt.dll`，旧 GNU 构建启动失败（加载了伪造 DLL，退出码 127），新构建忽略该文件正常运行（退出码 0）。
+- `scripts/test-installer.ps1`（PowerShell 7，MSVC 调试版 Setup）62 项全部通过，含用 2.0.3 程序内更新器升级、真实安装包加 CLI 识别示例表格。
+- 新安装包 SHA-256：`AAA5F5F7F7BFA7D2DED910E57D82D4C3085AD30ECC9F9031D0E68DCB29509BE4`，取代 10-28 的 `C44C2F9D…`。
+- 未覆盖：GitHub Actions CI、未装 VC++ 运行库的干净系统、真实 UAC 交互安装、`scripts/test-updater.ps1`、`scripts/test-table-samples.ps1`、真实云端服务。安装包仍无 Authenticode 签名。
+
 ## 2.1.1 发布验证范围
 
 本次发布把 AI 调用方式从 MCP 服务改为一次性命令行程序 `sightocr-cli.exe` 与通用 Skill；安装包检测到已安装时提供卸载入口，安装与卸载窗口的版本号移到名称下方居中；修复卸载完成页停留超过 1 分钟时卸载程序要等重启才删除的问题。验证日期 2026-10-28，环境为 Windows 11 build 26300、Rust/Cargo 1.97.0、`stable-x86_64-pc-windows-gnu`。

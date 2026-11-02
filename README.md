@@ -132,7 +132,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Installer
 <details>
 <summary>构建说明</summary>
 
+- 发布必须使用 MSVC 工具链：`build.ps1` 默认用 `stable-x86_64-pc-windows-msvc`，可用 `-Toolchain` 指定其他 MSVC 版本。只有 MSVC 链接器能设置 `/DEPENDENTLOADFLAG`，让程序只从 System32 加载系统 DLL，防止管理员权限运行的安装包加载同目录被放入的 DLL；`.cargo/config.toml` 静态链接 C 运行库，程序不依赖 VC++ 运行库。`tests/pe_hardening.rs` 会检查这两点。
 - 构建脚本串行运行测试，避免原生字体/焦点测试争用 Windows 桌面状态。
+- 缺少 `resources/oneocr` 时，依赖本地模型的测试显示为「忽略」，不计为通过。
 - 缺少 Windows 补充字体的验证机可传入 `-SkipOptionalFontTests`，只排除两项多语言字形覆盖测试；使用该选项时须在验证记录中注明。
 - Cargo 未加入 PATH 时，脚本会自动寻找 `$env:USERPROFILE\.cargo\bin\cargo.exe`。
 - 图标、版本号和 DPI manifest 嵌入 EXE；用户配置不随包发布。

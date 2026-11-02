@@ -1,12 +1,20 @@
-param([switch]$Installer, [switch]$SkipOptionalFontTests)
+param(
+    [switch]$Installer,
+    [switch]$SkipOptionalFontTests,
+    # Releases must use MSVC: only its linker sets DependentLoadFlags, which keeps
+    # the elevated Setup from loading planted DLLs (see tests/pe_hardening.rs).
+    [string]$Toolchain = 'stable-x86_64-pc-windows-msvc'
+)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
 $cargoCommand = Get-Command cargo -ErrorAction SilentlyContinue
 $cargoPath = if ($cargoCommand) { $cargoCommand.Source } else { Join-Path $env:USERPROFILE '.cargo/bin/cargo.exe' }
 if (-not (Test-Path -LiteralPath $cargoPath)) { throw 'Rust toolchain not found.' }
+if ($Toolchain -notmatch '-msvc$') { throw "Release builds require an MSVC toolchain, not '$Toolchain'." }
+# Check, test and build with the toolchain that produces the shipped binaries.
 function Invoke-Cargo([string[]]$CargoArguments) {
-    & $cargoPath @CargoArguments
+    & $cargoPath "+$Toolchain" @CargoArguments
     if ($LASTEXITCODE -ne 0) { throw "cargo $CargoArguments failed ($LASTEXITCODE)." }
 }
 Invoke-Cargo -CargoArguments @('fmt', '--all', '--', '--check')
@@ -93,7 +101,8 @@ if ($Installer) {
     $programHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'SightOCR.exe') -Algorithm SHA256).Hash
     $cliHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'sightocr-cli.exe') -Algorithm SHA256).Hash
     # Published next to the setup asset for clients whose GitHub digest is absent.
-    $checksumText = "$installerHash  $([IO.Path]::GetFileName($installerPath))`n$programHash  ../SightOCR/SightOCR.exe`n$cliHash  ../SightOCR/sightocr-cli.exe`n"
+    # Program paths are relative to the extracted portable package, never "../".
+    $checksumText = "$installerHash  $([IO.Path]::GetFileName($installerPath))`n$programHash  SightOCR/SightOCR.exe`n$cliHash  SightOCR/sightocr-cli.exe`n"
     [IO.File]::WriteAllText((Join-Path $installerDir 'SHA256SUMS.txt'), $checksumText, [Text.UTF8Encoding]::new($false))
     Write-Host "Installer: $installerPath"
     Write-Host "Installer SHA256: $installerHash"

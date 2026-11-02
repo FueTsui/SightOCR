@@ -1,0 +1,5 @@
+# Link the C runtime statically on MSVC. Otherwise every program imports
+# VCRUNTIME140.dll, which is not a system DLL: clean Windows installs would
+# need the VC++ redistributable, and Setup could load a planted copy.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
