@@ -31,12 +31,15 @@ if ($SkipOptionalFontTests) {
 }
 Invoke-Cargo -CargoArguments $testArguments
 Invoke-Cargo -CargoArguments @('build', '--release', '--locked', '--bins')
+# Honour CARGO_TARGET_DIR: under a folder protected by Controlled Folder Access
+# only allow-listed tools may write, so builds can live outside the checkout.
+$cargoTarget = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) } else { Join-Path $projectRoot 'target' }
 $packageRoot = Join-Path $projectRoot 'dist/SightOCR'
 $stagingRoot = Join-Path $projectRoot ('target/package-' + [guid]::NewGuid().ToString('N'))
 $modelRoot = Join-Path $stagingRoot 'resources/oneocr'
 New-Item -ItemType Directory -Path $modelRoot -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/SightOCR.exe') -Destination $stagingRoot
-Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/sightocr-cli.exe') -Destination $stagingRoot
+Copy-Item -LiteralPath (Join-Path $cargoTarget 'release/SightOCR.exe') -Destination $stagingRoot
+Copy-Item -LiteralPath (Join-Path $cargoTarget 'release/sightocr-cli.exe') -Destination $stagingRoot
 foreach ($name in @('oneocr.dll', 'onnxruntime.dll', 'oneocr.onemodel')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "resources/oneocr/$name") -Destination $modelRoot -Force
 }
@@ -92,11 +95,15 @@ if ($Installer) {
     $installerDir = Join-Path $projectRoot 'dist/installer'
     New-Item -ItemType Directory -Path $installerDir -Force | Out-Null
     $installerPath = Join-Path $installerDir "SightOCR-Setup-$($versionMatch.Groups[1].Value).exe"
-    # The release build has no console, so wait for it explicitly.
-    $packer = Start-Process -FilePath (Join-Path $projectRoot 'target/release/SightOCR-Setup.exe') `
-        -ArgumentList @('--pack', "`"$packageRoot`"", "`"$installerPath`"") -Wait -PassThru -NoNewWindow
+    # The release build has no console, so wait for it explicitly. It writes
+    # next to itself first: an unsigned Setup may not write into the checkout.
+    $packedPath = Join-Path $cargoTarget ('release/' + [IO.Path]::GetFileName($installerPath))
+    Remove-Item -LiteralPath $packedPath -Force -ErrorAction SilentlyContinue
+    $packer = Start-Process -FilePath (Join-Path $cargoTarget 'release/SightOCR-Setup.exe') `
+        -ArgumentList @('--pack', "`"$packageRoot`"", "`"$packedPath`"") -Wait -PassThru -NoNewWindow
     if ($packer.ExitCode -ne 0) { throw "Installer packaging failed ($($packer.ExitCode))." }
-    if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) { throw 'Installer output is missing.' }
+    if (-not (Test-Path -LiteralPath $packedPath -PathType Leaf)) { throw 'Installer output is missing.' }
+    Move-Item -LiteralPath $packedPath -Destination $installerPath -Force
     $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash
     $programHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'SightOCR.exe') -Algorithm SHA256).Hash
     $cliHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'sightocr-cli.exe') -Algorithm SHA256).Hash
