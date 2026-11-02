@@ -1,5 +1,16 @@
 # 当前变更说明
 
+## 2.1.1 发布验证范围
+
+本次发布把 AI 调用方式从 MCP 服务改为一次性命令行程序 `sightocr-cli.exe` 与通用 Skill；安装包检测到已安装时提供卸载入口，安装与卸载窗口的版本号移到名称下方居中；修复卸载完成页停留超过 1 分钟时卸载程序要等重启才删除的问题。验证日期 2026-10-28，环境为 Windows 11 build 26300、Rust/Cargo 1.97.0、`stable-x86_64-pc-windows-gnu`。
+
+- 在含 OneOCR 资源的本地开发目录中运行 `scripts/build.ps1 -Installer`，通过格式检查、严格 Clippy 与串行默认测试：246 项通过、25 项显式忽略、0 项失败。新增 4 项 CLI 单元测试、4 项 CLI 进程集成测试（真实管道、中文与 UTF-16 输入、ASCII 转义 JSON、退出码、不输出凭据，并用本地模型识别示例表格；缺少模型时该项自动跳过）和 1 项安装器单元测试。未启用 `private-table-samples`。
+- `scripts/test-installer.ps1`（PowerShell 7，隔离注册表与目录）62 项全部通过：全新安装、从 Inno Setup 安装升级、旧 MCP 服务运行时拒绝更新且停止后升级删除 `sightocr-mcp.exe` 与 `docs\MCP.md`、替换失败回滚、早期目录迁移、静默卸载与自删除、拒绝损坏安装包，以及安装真实安装包后用 CLI 和真实模型识别表格。第 [2] 项实际以本机已安装的 2.1.0 `SightOCR.exe` 执行程序内更新流程（脚本标题仍写作 2.0.3）。
+- 安装窗口的卸载入口在隔离环境中用调试版逐步点按验证：底部右侧显示「卸载 v2.1.1」，点击后安装窗口立即关闭并打开已安装版本的卸载程序；卸载页按钮完整显示，不再被底部栏遮挡；卸载后在完成页停留 70 秒再关闭，安装目录与 `unins000.exe` 均被删除。
+- CLI release 构建每次识别约 0.8 秒，构建或安装后首次调用约 10 秒（首次读取模型文件及安全扫描）。Windows PowerShell 5.1 中 `--json` 输出与 `--text` 中文输入正常；本机控制台为 UTF-8，未复现中文系统默认代码页下纯文本输出乱码的情形。
+- 安装包与程序版本为 2.1.1，`SightOCR-Setup-2.1.1.exe` 的 SHA-256 为 `C44C2F9DB55FC9698E85231D1C31B1CB3F602587E7CD8AD53F7285C62B465853`；发布目录 11 个文件，不含 `sightocr-mcp.exe` 与 `docs\MCP.md`。
+- 本次未执行 GitHub Actions CI、真实在线翻译、`scripts/test-table-samples.ps1`（需私有样本）、`scripts/test-updater.ps1`，也未在真实 UAC 环境中交互安装或卸载。
+
 ## 2.1.0 发布验证范围
 
 本次发布统一模型接口、改进本地表格与段落识别，并切换到 SightOCR 自带安装程序。README 和安装包、便携包均使用 2.1.0 截图。
@@ -25,7 +36,7 @@
 
 本版最终构建、CI、安装包与校验和证据见 GitHub Release 附件 VALIDATION.json。隔离测试不等于真实用户环境的 UAC、跨账户安装和网页快捷键验收；这些边界尚未完成交互测试。下面保留各历史版本的验证记录，不作为本版新增验收结论。
 
-2026-09-12：CLI 已移除，改为独立 MCP 程序与通用 Skill；下文为历次构建记录，其中旧 CLI 验证不适用于当前版本。当前调用方式见 [MCP 与 Skill](MCP.md)。
+2026-10-28：MCP 服务已移除，改为一次性命令行程序 `sightocr-cli.exe` 与通用 Skill，当前调用方式见 [CLI 与 Skill](CLI.md)。2026-09-12：旧 CLI 移除，改为独立 MCP 程序与通用 Skill。下文为历次构建记录，其中 MCP 与旧 CLI 的验证不适用于当前版本。
 
 # 验证记录
 
@@ -59,7 +70,7 @@
 - 默认 Bing 的授权 GET 原先使用禁止跳转的通用客户端，正常地区 HTTP 302 被当成失败；翻译 POST 和 Referer 也固定在 www。现在仅授权 GET 可在 HTTPS `www.bing.com`、`cn.bing.com` 间最多跳转 5 次，检查循环、非法地址及总超时，按 Cookie 域/路径/过期语义保存会话，并使用最终站点发起翻译。其他接口和翻译 POST 继续禁止自动重定向。
 - Bing 的 7 项本地 HTTP 回归通过，覆盖地区 302、相对 301、会话到译文、Cookie 范围、跳转限制及非法跳转。真实 Microsoft 往返使用合成 `Hello world`，系统代理和直连分别连续翻译两次成功，并验证会话复用；从未读取实际服务密钥或输出 Cookie/token。
 - 安装和便携包包含 CLI 与使用文档，校验和增加 CLI 程序；安装器覆盖同目录 GUI/CLI 进程检测。自动更新发现常驻 CLI/MCP 时立即提示先停止服务，避免无法收到 GUI 退出消息而等待 120 秒。安装回归包含真实 MCP 进程初始化、更新拒绝与文件保持检查。
-- 当前验证环境为 Windows 11 build 26200、Rust/Cargo 1.97.0、`stable-x86_64-pc-windows-gnu`。Win10 所报的地区 302 通过 HTTP 模拟覆盖，尚未在 Win10 实机复测。Bing 网页兼容接口仍可能随服务方变化。MCP 首版串行运行，不提供调用中的即时取消；具体限制见 [MCP 与 Skill](MCP.md)。
+- 当前验证环境为 Windows 11 build 26200、Rust/Cargo 1.97.0、`stable-x86_64-pc-windows-gnu`。Win10 所报的地区 302 通过 HTTP 模拟覆盖，尚未在 Win10 实机复测。Bing 网页兼容接口仍可能随服务方变化。MCP 首版串行运行，不提供调用中的即时取消；具体限制见当时的 MCP 文档（已移除）。
 - 本次全局检查、编辑专项、最终程序/安装包测试结果及 SHA256 以 `dist/installer/VALIDATION.json` 为准，详细日志保存在 `target/cli-mcp-edit-bing-20260908/`。沿用 2.0.0 版本号，请按 SHA256 区分历史构建。
 - 本机普通并行 `cargo test --locked` 有三项旧环境测试失败：两项缺少补充字体的广泛字形覆盖，以及一项原生字体选择断言。原生字体选择测试单独串行复跑通过，构建脚本因此串行测试；两项字形覆盖保留原断言，只有显式 `-SkipOptionalFontTests` 才排除。本次安装包采用该选项，不将这两项计作通过。全局严格 Clippy 通过；GNU 链接器报告既有 `.drectve` 诊断，该诊断不属于 Clippy 错误，保留在构建日志。
 

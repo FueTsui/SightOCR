@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const APP_EXE: &str = "SightOCR.exe";
-const MCP_EXE: &str = "sightocr-mcp.exe";
 const CLI_EXE: &str = "sightocr-cli.exe";
+/// The stdio MCP server earlier versions shipped; it ran as long as its client did.
+const LEGACY_MCP_EXE: &str = "sightocr-mcp.exe";
 pub const UNINSTALLER: &str = "unins000.exe";
 const ADMIN_MARKER: &str = "run-as-admin";
 const SHORTCUT: &str = "SightOCR.lnk";
@@ -29,7 +30,8 @@ const KEY_NAMES: [&str; 2] = [
 ];
 /// Files earlier versions installed that are no longer shipped.
 const OBSOLETE: &[&str] = &[
-    "sightocr-cli.exe",
+    LEGACY_MCP_EXE,
+    "docs/MCP.md",
     "docs/CLI_MCP.md",
     "docs/RUST_REFACTOR.md",
     "docs/VALIDATION.md",
@@ -78,7 +80,7 @@ pub struct Survey {
 }
 
 fn has_program(dir: &Path) -> bool {
-    [APP_EXE, MCP_EXE, CLI_EXE]
+    [APP_EXE, CLI_EXE, LEGACY_MCP_EXE]
         .iter()
         .any(|name| dir.join(name).is_file())
 }
@@ -185,6 +187,14 @@ impl Survey {
                 .filter(|r| same_path(&r.dir, dir))
                 .filter_map(|r| r.version.as_ref()),
         )
+    }
+
+    /// The registered uninstaller of the installation in `dir`.
+    pub fn uninstaller_in(&self, dir: &Path) -> Option<PathBuf> {
+        self.installs
+            .iter()
+            .find(|install| same_path(&install.dir, dir))
+            .and_then(|install| install.uninstaller.clone())
     }
 
     /// The folder of the current installation, preferring the main registration.
@@ -376,43 +386,35 @@ fn apply_tasks(env: &Env, dir: &Path, tasks: Tasks) -> Vec<String> {
 
 // --------------------------------------------------------------- processes
 
-fn program_paths(dir: &Path, gui: bool) -> Vec<PathBuf> {
-    let names: &[&str] = if gui {
-        &[APP_EXE, MCP_EXE, CLI_EXE]
-    } else {
-        &[MCP_EXE, CLI_EXE]
-    };
-    names.iter().map(|name| dir.join(name)).collect()
-}
-
-fn targets(dirs: &[PathBuf], gui: bool) -> Vec<PathBuf> {
+fn targets(dirs: &[PathBuf], names: &[&str]) -> Vec<PathBuf> {
     dirs.iter()
-        .flat_map(|dir| program_paths(dir, gui))
+        .flat_map(|dir| names.iter().map(|name| dir.join(name)))
         .collect()
 }
 
 /// SightOCR programs from these folders that are running now.
 pub fn running(dirs: &[PathBuf]) -> Result<Vec<Process>> {
-    let wanted = targets(dirs, true);
+    let wanted = targets(dirs, &[APP_EXE, CLI_EXE, LEGACY_MCP_EXE]);
     Process::find(|path| wanted.iter().any(|target| same_path(target, path))).map_err(Into::into)
 }
 
 /// Close running SightOCR programs in `dirs`. In-app updates refuse to stop a
-/// running MCP server (its client would lose it silently) and wait up to two
-/// minutes for SightOCR to finish; normal installs, already confirmed by the
-/// user, wait five seconds and then end the program.
+/// legacy MCP server (its client would lose it silently) and wait up to two
+/// minutes for SightOCR and any CLI command, which exits by itself within
+/// that limit, to finish; normal installs, already confirmed by the user,
+/// wait five seconds and then end the programs.
 fn close_programs(dirs: &[PathBuf], update: bool, approved: bool) -> Result<()> {
     let processes = running(dirs)?;
     if processes.is_empty() {
         return Ok(());
     }
-    let consoles = targets(dirs, false);
+    let legacy = targets(dirs, &[LEGACY_MCP_EXE]);
     if update
         && processes
             .iter()
-            .any(|process| consoles.iter().any(|path| same_path(path, &process.path)))
+            .any(|process| legacy.iter().any(|path| same_path(path, &process.path)))
     {
-        bail!("此安装目录的 SightOCR MCP 正在运行。请在终端或 MCP 客户端停止服务后重试更新，尚未替换任何文件。");
+        bail!("此安装目录的旧版 SightOCR MCP 服务正在运行。请在 MCP 客户端中停止或删除 sightocr-mcp 服务后重试更新，尚未替换任何文件。");
     }
     ensure!(
         update || approved,
@@ -969,6 +971,22 @@ pub fn launch_app(dir: &Path) {
 
 // --------------------------------------------------------------- uninstall
 
+/// Open the uninstaller of an existing installation in its own window. It
+/// removes the files that version recorded (setup only knows its own list)
+/// and also covers Inno Setup installations of 2.0.x. It starts in the temp
+/// folder so its working folder never keeps the installation folder in use.
+pub fn launch_uninstaller(uninstaller: &Path) -> Result<()> {
+    logln!(
+        "Starting the installed uninstaller {}",
+        uninstaller.display()
+    );
+    std::process::Command::new(uninstaller)
+        .current_dir(std::env::temp_dir())
+        .spawn()
+        .context("无法启动卸载程序")?;
+    Ok(())
+}
+
 pub struct UninstallPlan {
     pub dir: PathBuf,
     pub remove_settings: bool,
@@ -1104,6 +1122,13 @@ fn schedule_self_removal(dir: &Path) {
 /// Runs from the temp copy started by [`schedule_self_removal`].
 pub fn cleanup_after_uninstall(dir: &Path) {
     let uninstaller = dir.join(UNINSTALLER);
+    // The uninstaller keeps its result page open until the user closes it,
+    // which can take longer than the retry loop below; wait for it first.
+    if let Ok(running) = Process::find(|path| same_path(path, &uninstaller)) {
+        for process in &running {
+            process.wait(u32::MAX); // INFINITE
+        }
+    }
     for _ in 0..240 {
         if !uninstaller.exists() || std::fs::remove_file(&uninstaller).is_ok() {
             break;
@@ -1134,6 +1159,29 @@ mod tests {
         assert_eq!(compare_versions("2.0.3", "2.1.0"), Ordering::Less);
         assert_eq!(compare_versions("2.10.0", "2.9.9"), Ordering::Greater);
         assert_eq!(compare_versions("v2.1", "2.1.0"), Ordering::Equal);
+    }
+
+    #[test]
+    fn uninstaller_is_found_only_for_its_folder() {
+        let survey = Survey {
+            registrations: Vec::new(),
+            installs: vec![
+                OldInstall {
+                    dir: PathBuf::from(r"C:\Program Files\SightOCR"),
+                    uninstaller: Some(PathBuf::from(r"C:\Program Files\SightOCR\unins000.exe")),
+                },
+                OldInstall {
+                    dir: PathBuf::from(r"C:\Old\SightOCR"),
+                    uninstaller: None,
+                },
+            ],
+        };
+        assert_eq!(
+            survey.uninstaller_in(Path::new(r"c:\program files\sightocr\")),
+            Some(PathBuf::from(r"C:\Program Files\SightOCR\unins000.exe"))
+        );
+        assert_eq!(survey.uninstaller_in(Path::new(r"C:\Old\SightOCR")), None);
+        assert_eq!(survey.uninstaller_in(Path::new(r"D:\SightOCR")), None);
     }
 
     #[test]

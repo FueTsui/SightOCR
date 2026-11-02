@@ -5,7 +5,7 @@
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-if (-not $BinaryPath) { $BinaryPath = Join-Path $projectRoot 'target/release/sightocr-mcp.exe' }
+if (-not $BinaryPath) { $BinaryPath = Join-Path $projectRoot 'target/release/sightocr-cli.exe' }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $projectRoot 'target/table-samples-after' }
 $BinaryPath = [IO.Path]::GetFullPath($BinaryPath)
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
@@ -159,31 +159,22 @@ try {
             if (Test-Path -LiteralPath $output -PathType Leaf) { Remove-Item -LiteralPath $output }
             $start = [Diagnostics.ProcessStartInfo]::new()
             $start.FileName = $BinaryPath
+            $start.Arguments = "ocr `"$image`" --table --json"
             $start.UseShellExecute = $false
             $start.CreateNoWindow = $true
-            $start.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
             $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
-            $start.RedirectStandardInput = $true
             $start.RedirectStandardOutput = $true
             $start.RedirectStandardError = $true
             $process = [Diagnostics.Process]::Start($start)
             try {
                 $response = $process.StandardOutput.ReadToEndAsync()
                 $errors = $process.StandardError.ReadToEndAsync()
-                $requests = @(
-                    @{jsonrpc='2.0';id=1;method='initialize';params=@{protocolVersion='2025-11-25';capabilities=@{};clientInfo=@{name='table-test';version='1'}}},
-                    @{jsonrpc='2.0';method='notifications/initialized'},
-                    @{jsonrpc='2.0';id=2;method='tools/call';params=@{name='sightocr_ocr';arguments=@{image_path=$image;table=$true}}}
-                )
-                foreach ($request in $requests) { $process.StandardInput.WriteLine(($request | ConvertTo-Json -Compress -Depth 8)) }
-                $process.StandardInput.Close()
                 if (-not $process.WaitForExit(60000)) { $process.Kill(); $process.WaitForExit(); throw 'Sample OCR exceeded 60 seconds.' }
                 $exitCode = $process.ExitCode
                 [IO.File]::WriteAllText($stderr, $errors.Result)
-                if ($exitCode -ne 0) { throw "MCP exited $exitCode" }
-                $reply = ($response.Result.Trim() -split "`n")[-1] | ConvertFrom-Json
-                if ($reply.result.isError -or $null -eq $reply.result.structuredContent.text) { throw ("MCP table recognition failed: " + ($reply | ConvertTo-Json -Compress -Depth 8)) }
-                $text = $reply.result.structuredContent.text.TrimEnd([char[]]"`r`n")
+                $reply = $response.Result.Trim() | ConvertFrom-Json
+                if ($exitCode -ne 0 -or $null -eq $reply.text) { throw ("CLI table recognition failed ($exitCode): " + $errors.Result.Trim()) }
+                $text = $reply.text.TrimEnd([char[]]"`r`n")
                 [IO.File]::WriteAllText($output, $text, [Text.UTF8Encoding]::new($false))
             } finally { $process.Dispose() }
             if ($text.Length -gt 0) {

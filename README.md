@@ -14,7 +14,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-0078D4)
 ![Rust](https://img.shields.io/badge/rust-1.88%2B-orange)
 
-[下载](https://github.com/FueTsui/SightOCR/releases/latest) · [使用说明](docs/USAGE.md) · [安装与升级](docs/INSTALLATION.md) · [MCP 与 Skill](docs/MCP.md)
+[下载](https://github.com/FueTsui/SightOCR/releases/latest) · [使用说明](docs/USAGE.md) · [安装与升级](docs/INSTALLATION.md) · [CLI 与 Skill](docs/CLI.md)
 
 </div>
 
@@ -34,7 +34,7 @@
 - **模型接口**：支持 OpenAI Chat Completions 兼容、OpenAI Responses、Anthropic Messages、Google Gemini、Mistral OCR 五种协议，可接入 Azure OpenAI、DeepSeek、通义千问、腾讯混元、Ollama、LM Studio 等。
 - **多语言显示**：原生 Unicode 编辑控件，支持阿拉伯文等双向排版、印度及东南亚文字和输入法。
 - **静默识别**：一键框选，结果直接进剪贴板，不弹窗口。
-- **MCP 服务**：附带 `sightocr-mcp.exe` 和通用 Skill，让 AI 客户端调用识别与翻译。
+- **CLI 与 Skill**：附带命令行程序 `sightocr-cli.exe` 和通用 Skill，让 AI agent 调用识别与翻译；每次调用执行完即退出，不常驻后台。
 - **轻量**：Rust + egui + Win32 编写，无需 Python、Qt 或其他运行时；日常运行无需管理员权限。
 
 ## 📥 安装
@@ -44,6 +44,7 @@
 - 系统要求：Windows 10 / 11 x64
 - 默认安装到 `C:\Program Files\SightOCR`，覆盖安装会保留设置、密钥与快捷方式
 - 程序内可自动检查更新，下载后校验 SHA256 再安装
+- 卸载：在 Windows「已安装的应用」中卸载，或再次运行安装包并点击窗口右下角的「卸载」
 - 可用发布附件 `SHA256SUMS.txt` 核对安装包
 
 安装、升级、静默安装参数与卸载说明见 [Windows 安装包](docs/INSTALLATION.md)。
@@ -88,22 +89,18 @@
 
 更多细节——表格识别规则、版面分析、各协议的请求格式、代理与配置文件——见 [使用说明](docs/USAGE.md)。
 
-## 🤖 MCP 与 Skill
+## 🤖 CLI 与 Skill
 
-`sightocr-mcp.exe` 是本地 stdio MCP 服务，无需参数，不监听网络端口：
+`sightocr-cli.exe` 是给 AI agent 和脚本使用的命令行程序。每次调用执行一条命令后立即退出，不监听网络端口：
 
-```json
-{
-  "mcpServers": {
-    "sightocr": {
-      "command": "C:\\Program Files\\SightOCR\\sightocr-mcp.exe",
-      "args": []
-    }
-  }
-}
+```powershell
+sightocr-cli ocr C:\Pictures\table.png --table --json
+sightocr-cli translate --text "Hello" --to zh-Hans
+sightocr-cli languages
+sightocr-cli providers
 ```
 
-提供 `sightocr_ocr`（本地识别图片）、`sightocr_translate`（翻译文本）、`sightocr_languages`（列出语言）三个工具。安装目录中的 `skills/sightocr/SKILL.md` 是配套的通用 Skill。详见 [MCP 与 Skill](docs/MCP.md)。
+默认输出纯文本；`--json` 输出 ASCII 转义的 JSON，`-o` 写入 UTF-8 文件。安装目录中的 `skills/sightocr/SKILL.md` 是配套的通用 Skill，复制到 AI 客户端的技能目录即可使用。早期版本的 MCP 服务 `sightocr-mcp.exe` 已移除。详见 [CLI 与 Skill](docs/CLI.md)。
 
 ## 🛠️ 从源码构建
 
@@ -140,7 +137,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Installer
 - Cargo 未加入 PATH 时，脚本会自动寻找 `$env:USERPROFILE\.cargo\bin\cargo.exe`。
 - 图标、版本号和 DPI manifest 嵌入 EXE；用户配置不随包发布。
 - 公开 CI 运行默认测试；依赖补充字体和交互桌面的测试默认忽略，需在配置完整的 Windows 机器上串行执行。
-- 其他回归脚本：`scripts/test-mcp.ps1`、`scripts/test-installer.ps1`（需 PowerShell 7，隔离验证安装 / 升级 / 卸载及 2.0.x 程序内更新兼容）、`scripts/test-updater.ps1`。
+- 其他回归脚本：`scripts/test-cli.ps1`、`scripts/test-installer.ps1`（需 PowerShell 7，隔离验证安装 / 升级 / 卸载及 2.0.x 程序内更新兼容）、`scripts/test-updater.ps1`。
 - 公开源码不包含 OneOCR 资源，也不包含真实业务表格及其派生夹具。
 - 本地私有表格样本回归需备齐夹具后运行 `cargo test --locked --features private-table-samples -- --test-threads=1`；公开源码的默认检查不依赖这些文件。
 
@@ -152,11 +149,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Installer
 ```text
 rust/
 ├── main.rs            GUI 入口
-├── console.rs         sightocr-mcp.exe 入口
+├── console.rs         sightocr-cli.exe 入口
+├── cli.rs             命令行参数、输出格式与退出码
 ├── app.rs             应用状态、任务与系统事件
 ├── config.rs          配置验证、迁移与原子保存
-├── headless.rs        MCP 无界面识别与翻译任务
-├── mcp.rs             本地 stdio MCP 协议与工具
+├── headless.rs        无界面识别与翻译任务
 ├── ocr.rs             OneOCR FFI 与 COM 生命周期
 ├── ocr/               本地表格恢复与版面分析
 ├── platform.rs        截图、热键、托盘、自启、单实例
@@ -178,7 +175,7 @@ resources/oneocr/      OneOCR DLL 与模型（不随源码提供）
 | --- | --- |
 | [使用说明](docs/USAGE.md) | 各项功能的详细行为 |
 | [Windows 安装包](docs/INSTALLATION.md) | 安装、升级、程序内更新与卸载 |
-| [MCP 与 Skill](docs/MCP.md) | MCP 配置、工具列表与排错 |
+| [CLI 与 Skill](docs/CLI.md) | 命令、输出格式、Skill 安装与排错 |
 | [界面设计记录](docs/UI_DESIGN.md) | 视觉规范与验证范围 |
 | [重构记录](docs/RUST_REFACTOR.md) | Rust 重写的问题清单与人工回归项 |
 | [验证记录](docs/VALIDATION.md) | 各版本实测结果 |
@@ -192,6 +189,13 @@ resources/oneocr/      OneOCR DLL 与模型（不随源码提供）
 - Arm64 Windows 的 x64 模拟环境尚未验证。
 
 ## 📝 更新日志
+
+**2.1.1**
+- AI 调用方式由 MCP 服务改为命令行程序 `sightocr-cli.exe` 与配套 Skill：每次调用执行完即退出，不再常驻后台，安装和更新时不会因服务占用程序文件而失败。
+- 新增 `providers` 命令，列出可用的翻译服务与默认设置；`--json` 输出 ASCII 转义的 JSON，`-o` 写入 UTF-8 文件，翻译原文可从 `--text`、`--file`（UTF-8 / UTF-16）或标准输入读取。
+- 升级时删除旧的 `sightocr-mcp.exe`；旧 MCP 服务运行时，程序内更新会提示先停止服务。请从 AI 客户端配置中删除 `sightocr` MCP 服务，并重新复制 Skill。
+- 安装包检测到已安装时，窗口底部右侧提供「卸载」，直接打开已安装版本的卸载程序；版本号移到名称下方居中显示。
+- 修复卸载完成页停留超过 1 分钟时，卸载程序要等重启后才能删除的问题。
 
 **2.1.0**
 - 原 Mistral、OpenAI、NVIDIA 固定接口统一为可自定义名称的「模型接口」，支持五种标准协议，用于识别（文字 / 表格 / 公式）与翻译；旧配置自动迁移。

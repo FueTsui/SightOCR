@@ -1,4 +1,5 @@
-//! Shared MCP operations. Neither configuration migration nor UI setup runs here.
+//! Headless operations behind `sightocr-cli.exe`. Neither configuration
+//! migration nor UI setup runs here; settings are only read.
 use crate::{
     config::{normalize_language, Config, LANGUAGES},
     worker::{self, Output, Request, Task, Worker},
@@ -13,8 +14,6 @@ use std::{
 
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
-/// JSON Schema pattern for the `provider` argument and result.
-pub const PROVIDER_PATTERN: &str = "^(bing|baidu|tencent|model:[a-z0-9-]{1,32})$";
 
 pub(crate) fn validate_text(text: &str) -> Result<()> {
     ensure!(!text.trim().is_empty(), "Text must not be empty");
@@ -24,8 +23,8 @@ pub(crate) fn validate_text(text: &str) -> Result<()> {
 }
 
 pub(crate) fn validate_language(language: &str, target: bool) -> Result<String> {
-    let language =
-        normalize_language(language).context("Unsupported language; call sightocr_languages")?;
+    let language = normalize_language(language)
+        .context("Unsupported language; run `sightocr-cli languages`")?;
     ensure!(
         !target || language != "auto",
         "Target language must not be auto"
@@ -33,7 +32,7 @@ pub(crate) fn validate_language(language: &str, target: bool) -> Result<String> 
     Ok(language.to_owned())
 }
 
-/// Map an MCP provider name to a saved selection. Model interfaces use their id:
+/// Map a CLI provider name to a saved selection. Model interfaces use their id:
 /// `model:{id}`. The former fixed names `openai`, `nvidia` and `generic` still work
 /// because migration keeps those ids.
 pub(crate) fn validate_provider(provider: &str) -> Result<String> {
@@ -59,6 +58,59 @@ pub(crate) fn validate_provider(provider: &str) -> Result<String> {
     })
 }
 
+/// The CLI name of a saved translation selection.
+fn provider_name(selection: &str) -> Result<String> {
+    Ok(match selection {
+        "默认" | "Bing" | "Edge" => "bing".to_owned(),
+        "Baidu" => "baidu".into(),
+        "Tencent" => "tencent".into(),
+        selection => match crate::config::model_translator(selection) {
+            Some(id) => format!("model:{id}"),
+            None => bail!("Unsupported saved provider; set --provider or update settings"),
+        },
+    })
+}
+
+/// Translation providers usable with `--provider`, plus the saved defaults.
+/// Names and ids only: credentials are never returned.
+pub(crate) fn providers() -> Result<Value> {
+    let mut config = Config::load_read_only()
+        .context("Cannot read settings; check SIGHTOCR_CONFIG and configuration fields")?;
+    config.normalize().context("Invalid translation settings")?;
+    let default = provider_name(&config.last_translate_selection)?;
+    let filled = |a: &str, b: &str| !a.trim().is_empty() && !b.trim().is_empty();
+    let mut list = vec![
+        ("bing".to_owned(), "Bing".to_owned(), true),
+        (
+            "baidu".into(),
+            "Baidu".into(),
+            filled(&config.baidu_trans_appid, &config.baidu_trans_appkey),
+        ),
+        (
+            "tencent".into(),
+            "Tencent".into(),
+            filled(
+                &config.tencent_trans_secret_id,
+                &config.tencent_trans_secret_key,
+            ),
+        ),
+    ];
+    list.extend(
+        config
+            .model_profiles
+            .iter()
+            .filter(|profile| profile.can_translate())
+            .map(|profile| (format!("model:{}", profile.id), profile.name.clone(), true)),
+    );
+    Ok(json!({
+        "providers": list.iter().map(|(provider, name, configured)| json!({
+            "provider": provider, "name": name, "configured": configured, "default": *provider == default
+        })).collect::<Vec<_>>(),
+        "source_lang": config.source_lang,
+        "target_lang": config.target_lang,
+    }))
+}
+
 pub(crate) fn languages() -> Value {
     json!({"languages": LANGUAGES.iter().map(|(code, name)| json!({
         "code": code, "name": name, "source": true, "target": *code != "auto"
@@ -66,8 +118,8 @@ pub(crate) fn languages() -> Value {
 }
 
 /// Native DLLs are isolated in the existing private worker process, so native
-/// stdout cannot corrupt JSON-RPC. The process is lazy and is killed on timeout
-/// or session teardown (after any serial call finishes).
+/// stdout cannot corrupt CLI output. The process is lazy and is killed on
+/// timeout or when the CLI exits.
 #[derive(Default)]
 pub(crate) struct Headless {
     worker: Option<Worker>,
@@ -175,15 +227,7 @@ impl Headless {
                 || crate::config::model_translator(&requested).is_none(),
             "The selected model interface does not exist or cannot translate; check SightOCR settings"
         );
-        let provider = match config.last_translate_selection.as_str() {
-            "默认" | "Bing" | "Edge" => "bing".to_owned(),
-            "Baidu" => "baidu".into(),
-            "Tencent" => "tencent".into(),
-            selection => match crate::config::model_translator(selection) {
-                Some(id) => format!("model:{id}"),
-                None => bail!("Unsupported saved provider; set provider or update settings"),
-            },
-        };
+        let provider = provider_name(&config.last_translate_selection)?;
         let source = config.source_lang.clone();
         let target = config.target_lang.clone();
         let output = self.execute(config, Task::Translate(text.into()))?;

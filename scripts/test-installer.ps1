@@ -10,7 +10,7 @@
 # -Updater names a SightOCR 2.0.x executable. Its real --apply-update code is
 # used to install the new package, proving in-app updates from that version.
 # -Package names a real package folder; it is installed (still isolated) and
-# its MCP server must recognise tests/fixtures/basic.png with the real model.
+# its CLI must recognise tests/fixtures/basic.png with the real model.
 param(
     [string]$Updater = (Join-Path $env:ProgramFiles 'SightOCR\SightOCR.exe'),
     # A real package folder (with OneOCR resources) for the installed-OCR check.
@@ -115,11 +115,11 @@ try {
         New-Item -ItemType Directory -Path (Join-Path $fakePackage $dir) -Force | Out-Null
     }
     Copy-Item $fixture (Join-Path $fakePackage 'SightOCR.exe')
-    Copy-Item $fixture (Join-Path $fakePackage 'sightocr-mcp.exe')
+    Copy-Item $fixture (Join-Path $fakePackage 'sightocr-cli.exe')
     Set-Content (Join-Path $fakePackage 'README.md') "new readme $version" -Encoding utf8
     Set-Content (Join-Path $fakePackage 'LICENSE') 'MIT' -Encoding utf8
     Set-Content (Join-Path $fakePackage 'docs\USAGE.md') 'usage' -Encoding utf8
-    Set-Content (Join-Path $fakePackage 'docs\MCP.md') 'mcp' -Encoding utf8
+    Set-Content (Join-Path $fakePackage 'docs\CLI.md') 'cli' -Encoding utf8
     Set-Content (Join-Path $fakePackage 'skills\sightocr\SKILL.md') 'skill' -Encoding utf8
     $random = [Random]::new(7)
     foreach ($name in 'oneocr.dll', 'onnxruntime.dll', 'oneocr.onemodel') {
@@ -218,15 +218,24 @@ try {
     Assert (Test-Path (Join-Path $stage 'installer.log')) 'log written where the updater asked'
     Stop-TestPrograms
 
-    Write-Host "`n[3] In-app update refuses while the MCP server runs"
+    Write-Host "`n[3] In-app update refuses while a legacy MCP server runs, then removes it"
     $readme = (Get-FileHash (Join-Path $programDir 'README.md')).Hash
-    $mcp = Start-Process -FilePath (Join-Path $programDir 'sightocr-mcp.exe') -PassThru
+    $legacy = Join-Path $programDir 'sightocr-mcp.exe'
+    Copy-Item $fixture $legacy
+    Set-Content (Join-Path $programDir 'docs\MCP.md') 'legacy mcp' -Encoding utf8
+    $mcp = Start-Process -FilePath $legacy -PassThru
     Start-Sleep -Milliseconds 800
     $code = Invoke-Program $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/UPDATE', "/DIR=$programDir", "/LOG=$work\3.log")
     Stop-Process -Id $mcp.Id -Force -ErrorAction SilentlyContinue
+    $mcp.WaitForExit(10000) | Out-Null
     Assert ($code -eq 7) "exit code 7 (got $code)"
     Assert ((Get-Content "$work\3.log" -Raw) -match 'MCP') 'reason logged'
     Assert ((Get-FileHash (Join-Path $programDir 'README.md')).Hash -eq $readme) 'nothing replaced'
+    Stop-TestPrograms
+    $code = Invoke-Program $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', "/DIR=$programDir", "/LOG=$work\3b.log")
+    Assert ($code -eq 0) "install after stopping it succeeds (got $code)"
+    Assert (-not (Test-Path $legacy) -and -not (Test-Path (Join-Path $programDir 'docs\MCP.md'))) 'legacy MCP server and its document removed'
+    Assert (Test-Path (Join-Path $programDir 'sightocr-cli.exe')) 'CLI installed'
     Stop-TestPrograms
 
     Write-Host "`n[4] A failure while replacing files restores the previous version"
@@ -298,28 +307,21 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Packing the real package failed.' }
         $code = Invoke-Program $realSetup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/TASKS=', "/LOG=$work\8.log") 600
         Assert ($code -eq 0) "exit code 0 (got $code)"
-        $info = [Diagnostics.ProcessStartInfo]::new((Join-Path $programDir 'sightocr-mcp.exe'))
+        $image = Join-Path $projectRoot 'tests\fixtures\basic.png'
+        $info = [Diagnostics.ProcessStartInfo]::new((Join-Path $programDir 'sightocr-cli.exe'), "ocr `"$image`" --table --json")
         $info.UseShellExecute = $false
-        $info.RedirectStandardInput = $true
         $info.RedirectStandardOutput = $true
         $info.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
         $info.CreateNoWindow = $true
         $probe = [Diagnostics.Process]::Start($info)
         try {
-            $image = Join-Path $projectRoot 'tests\fixtures\basic.png'
-            $requests = @(
-                @{jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{protocolVersion = '2025-11-25'; capabilities = @{}; clientInfo = @{name = 'installer'; version = '1' } } },
-                @{jsonrpc = '2.0'; method = 'notifications/initialized' },
-                @{jsonrpc = '2.0'; id = 2; method = 'tools/call'; params = @{name = 'sightocr_ocr'; arguments = @{image_path = $image; table = $true } } }
-            )
-            foreach ($request in $requests) { $probe.StandardInput.WriteLine(($request | ConvertTo-Json -Compress -Depth 8)) }
-            $probe.StandardInput.Close()
             $output = $probe.StandardOutput.ReadToEndAsync()
-            if (-not $probe.WaitForExit(60000)) { $probe.Kill(); throw 'Installed MCP OCR timed out.' }
-            $reply = ($output.Result.Trim() -split "`n")[-1] | ConvertFrom-Json
-            $text = [string]$reply.result.structuredContent.text
+            if (-not $probe.WaitForExit(60000)) { $probe.Kill(); throw 'Installed CLI OCR timed out.' }
+            $exitCode = $probe.ExitCode
+            $reply = $output.Result.Trim() | ConvertFrom-Json
+            $text = [string]$reply.text
         } finally { $probe.Dispose() }
-        Assert (-not $reply.result.isError -and $text.Contains("Alpha`t100") -and $text.Contains("Beta`t200")) 'installed MCP recognises the sample table'
+        Assert ($exitCode -eq 0 -and $text.Contains("Alpha`t100") -and $text.Contains("Beta`t200")) 'installed CLI recognises the sample table'
         $code = Invoke-Program (Join-Path $programDir 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES')
         Assert ($code -eq 0) 'real package uninstalls'
     }

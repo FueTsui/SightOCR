@@ -1,4 +1,5 @@
-//! Console-subsystem entry point: pipes work without launching a desktop window.
+//! Console-subsystem entry point (`sightocr-cli.exe`): one command per run,
+//! so no process stays resident. Also hosts the private OCR worker process.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() == 2 && args[0] == sightocr::worker::SUBPROCESS_ARG {
@@ -7,12 +8,5 @@ fn main() {
         }
         return;
     }
-    if !args.is_empty() {
-        eprintln!("SightOCR MCP accepts no command arguments; connect using stdio.");
-        std::process::exit(2);
-    }
-    if let Err(error) = sightocr::mcp::run_stdio() {
-        eprintln!("SightOCR MCP: {error:#}");
-        std::process::exit(1);
-    }
+    std::process::exit(sightocr::cli::run(args));
 }

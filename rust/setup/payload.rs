@@ -25,7 +25,7 @@ const PRODUCT: &str = "SightOCR";
 /// from the package folder as found.
 const REQUIRED: &[&str] = &[
     "SightOCR.exe",
-    "sightocr-mcp.exe",
+    "sightocr-cli.exe",
     "README.md",
     "LICENSE",
     "resources/oneocr/oneocr.dll",

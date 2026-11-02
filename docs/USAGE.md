@@ -28,7 +28,7 @@
 
 普通识别完成时恢复并将结果窗口移至普通窗口最前方，保留用户调整的尺寸、最大化状态和置顶选择；静默识别不自动打开窗口。
 
-桌面界面专注截图与文字输入，不提供图片导入和拖放识别。文件识别可通过 MCP 的 `sightocr_ocr` 工具调用，支持 PNG、JPEG、BMP、WebP。
+桌面界面专注截图与文字输入，不提供图片导入和拖放识别。识别图片文件可使用命令行程序 `sightocr-cli.exe ocr`，支持 PNG、JPEG、BMP、WebP，见 [CLI 与 Skill](CLI.md)。
 
 ## 桌面界面
 
@@ -133,7 +133,7 @@ Base URL 应填写包含版本路径的地址，例如 `https://api.example.com/
 - 设置页实时显示将要请求的完整地址；「测试翻译」（或仅识别接口的「测试识别」）用当前填写内容发起一次很小的调用，验证地址、密钥与模型。
 - 图片与文字只放在用户消息中并按不可信内容处理，不启用工具调用，不跟随重定向，失败时不切换到其他服务；截断、拒绝、仅含推理内容等结果一律视为失败。
 - 升级时，已填写密钥或正在使用的 Mistral、OpenAI、NVIDIA 与 2.1 早期的「通用模型」设置自动转为同名模型接口，当前选择随之保留；旧字段不再重复保存密钥。
-- MCP 的 `sightocr_translate` 使用 `provider: "model:<编号>"` 调用模型接口；`openai`、`nvidia`、`generic` 旧名称继续可用。
+- 命令行程序使用 `sightocr-cli translate --provider model:<编号>` 调用模型接口，`sightocr-cli providers` 列出可用编号；`openai`、`nvidia`、`generic` 旧名称继续可用。
 
 协议参考：[Mistral OCR](https://docs.mistral.ai/api/endpoint/ocr) · [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat) · [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses) · [Anthropic Messages](https://platform.claude.com/docs/en/api/messages) · [Gemini generateContent](https://ai.google.dev/api/generate-content) · [NVIDIA Qwen3.5](https://docs.api.nvidia.com/nim/reference/qwen-qwen3-5-122b-a10b-infer)
 

@@ -113,7 +113,19 @@ pub fn install(env: Env, package: Package, options: Options, launcher: Launcher)
     if std::env::var("SIGHTOCR_SETUP_TEST_PAGE").as_deref() == Ok("options") {
         app.page = Page::Options;
     }
-    app.run_with(|_, _| {})
+    let uninstall_after = app.uninstall_after.clone();
+    let code = app.run_with(|_, _| {});
+    // Started only once the window is gone: Windows may scan the uninstaller
+    // before it runs, and the setup window must not hang meanwhile.
+    let uninstaller = uninstall_after.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(uninstaller) = uninstaller {
+        if let Err(error) = engine::launch_uninstaller(&uninstaller) {
+            logln!("FAILED: {error:#}");
+            win::message_box(&format!("{error:#}"), true);
+            return exit::FATAL;
+        }
+    }
+    code
 }
 
 pub fn uninstall(env: Env, package: Package, options: Options, dir: PathBuf) -> i32 {
@@ -405,6 +417,31 @@ fn button_row(ui: &mut Ui, buttons: &[(&str, bool)], size: egui::Vec2) -> Option
     clicked
 }
 
+/// A plain muted text link for a secondary action.
+fn text_link(ui: &mut Ui, label: &str) -> Response {
+    let p = colors(ui);
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        FontId::proportional(12.5),
+        Color32::PLACEHOLDER,
+    );
+    let (rect, response) = ui.allocate_exact_size(galley.size() + vec2(0.0, 6.0), Sense::click());
+    let color = if response.hovered() {
+        p.accent_hover
+    } else {
+        p.muted
+    };
+    ui.painter().galley(
+        pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
 /// A quiet accent link with a chevron in a circle, e.g. "⌄ 自定义选项".
 fn options_link(ui: &mut Ui, label: &str, down: bool) -> Response {
     let p = colors(ui);
@@ -570,6 +607,7 @@ fn badge(ui: &mut Ui, kind: Badge) {
 }
 
 /// A title followed by a small, quiet version tag, centred.
+/// The product name, centred, with its version tag centred below it.
 fn title_with_tag(ui: &mut Ui, title: &str, tag: &str) {
     let p = colors(ui);
     let name = ui
@@ -579,20 +617,21 @@ fn title_with_tag(ui: &mut Ui, title: &str, tag: &str) {
         .painter()
         .layout_no_wrap(tag.to_owned(), FontId::proportional(12.5), p.muted);
     let tag_size = label.size() + vec2(14.0, 6.0);
+    let gap = 6.0;
     let size = vec2(
-        name.size().x + 10.0 + tag_size.x,
-        name.size().y.max(tag_size.y),
+        name.size().x.max(tag_size.x),
+        name.size().y + gap + tag_size.y,
     );
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter().galley(
-        pos2(rect.left(), rect.center().y - name.size().y / 2.0),
-        name,
+        pos2(rect.center().x - name.size().x / 2.0, rect.top()),
+        name.clone(),
         p.text,
     );
     let tag_rect = Rect::from_min_size(
         pos2(
-            rect.right() - tag_size.x,
-            rect.center().y - tag_size.y / 2.0 + 2.0,
+            rect.center().x - tag_size.x / 2.0,
+            rect.top() + name.size().y + gap,
         ),
         tag_size,
     );
@@ -670,6 +709,8 @@ struct App {
     remove_settings: bool,
     close_approved: bool,
     notice: Option<String>,
+    /// The installed uninstaller to open after this window closes.
+    uninstall_after: Arc<Mutex<Option<PathBuf>>>,
     // Result
     launch_now: bool,
     done: Option<Done>,
@@ -702,6 +743,7 @@ impl App {
             remove_settings: false,
             close_approved: false,
             notice: None,
+            uninstall_after: Arc::default(),
             launch_now: true,
             done: None,
             failure: None,
@@ -997,6 +1039,36 @@ impl App {
         }
     }
 
+    /// When this folder already has SightOCR, offer its own uninstaller at
+    /// the right end of the footer row.
+    fn uninstall_link(&mut self, ui: &mut Ui, ctx: &egui::Context, row: Rect) {
+        let Some(version) = self.installed_version_here() else {
+            return;
+        };
+        let Some(uninstaller) = self.survey.uninstaller_in(Path::new(self.dir_text.trim())) else {
+            return;
+        };
+        let area = Rect::from_x_y_ranges(ui.max_rect().x_range(), row.y_range());
+        let clicked = ui
+            .scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(area)
+                    .layout(Layout::right_to_left(Align::Center)),
+                |ui| {
+                    text_link(ui, &format!("卸载 v{version}"))
+                        .on_hover_text("打开已安装版本的卸载程序，可选择是否同时删除设置。")
+                        .clicked()
+                },
+            )
+            .inner;
+        if clicked {
+            if let Ok(mut slot) = self.uninstall_after.lock() {
+                *slot = Some(uninstaller);
+            }
+            self.close(ctx, exit::CANCELLED);
+        }
+    }
+
     fn welcome_page(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         let p = colors(ui);
         ui.add_space(64.0);
@@ -1005,7 +1077,7 @@ impl App {
         match self.role {
             Role::Install => {
                 title_with_tag(ui, "SightOCR", VERSION);
-                ui.add_space(32.0);
+                ui.add_space(22.0);
                 if button(ui, self.install_label(), true, vec2(180.0, 40.0)).clicked() {
                     self.proceed(ctx);
                 }
@@ -1225,24 +1297,29 @@ impl App {
         }
     }
 
-    /// The centred "custom options" link at the bottom of the install pages.
-    fn footer(&mut self, ui: &mut Ui) {
-        if !matches!(self.mode, Mode::Interactive) || self.role != Role::Install {
-            return;
-        }
-        let expand = match self.page {
-            Page::Welcome => true,
-            Page::Options => false,
-            _ => return,
-        };
+    /// Only the interactive install pages have footer links.
+    fn has_footer(&self) -> bool {
+        matches!(self.mode, Mode::Interactive)
+            && self.role == Role::Install
+            && matches!(self.page, Page::Welcome | Page::Options)
+    }
+
+    /// The centred "custom options" link at the bottom of the install pages,
+    /// and the uninstall link at the right end of the same row.
+    fn footer(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let expand = self.page == Page::Welcome;
         let label = if expand {
             "自定义选项"
         } else {
             "收起选项"
         };
-        let clicked = ui
-            .vertical_centered(|ui| options_link(ui, label, expand).clicked())
+        let link = ui
+            .vertical_centered(|ui| options_link(ui, label, expand))
             .inner;
+        if expand {
+            self.uninstall_link(ui, ctx, link.rect);
+        }
+        let clicked = link.clicked();
         if clicked && expand {
             self.page = Page::Options;
         } else if clicked {
@@ -1292,16 +1369,19 @@ impl eframe::App for App {
             }
         }
         let p = palette(ctx.style().visuals.dark_mode);
-        egui::TopBottomPanel::bottom("footer")
-            .exact_height(64.0)
-            .show_separator_line(false)
-            .frame(egui::Frame::new().fill(p.window).inner_margin(Margin {
-                left: 22,
-                right: 22,
-                top: 0,
-                bottom: 22,
-            }))
-            .show(ctx, |ui| self.footer(ui));
+        // Pages without footer links get the full window height.
+        if self.has_footer() {
+            egui::TopBottomPanel::bottom("footer")
+                .exact_height(64.0)
+                .show_separator_line(false)
+                .frame(egui::Frame::new().fill(p.window).inner_margin(Margin {
+                    left: 22,
+                    right: 22,
+                    top: 0,
+                    bottom: 22,
+                }))
+                .show(ctx, |ui| self.footer(ui, ctx));
+        }
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()

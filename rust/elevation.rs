@@ -128,7 +128,7 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
 }
 
 /// Runs before any window, hotkey, or single-instance registration. Worker
-/// processes inherit the GUI token; MCP and the copied updater do not use this.
+/// processes inherit the GUI token; the CLI and the copied updater do not use this.
 pub fn relaunch_if_requested(silent: bool) -> Result<bool> {
     let executable = std::env::current_exe()?;
     let enabled = is_enabled()?;
