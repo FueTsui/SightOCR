@@ -13,6 +13,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -27,6 +28,10 @@ const ATTEMPTS: usize = 3;
 const HELPER_NAME: &str = "SightOCR-Updater.exe";
 const MANIFEST_NAME: &str = "update.json";
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024;
+const MAX_NOTES_CHARS: usize = 4000;
+const MAX_NOTES_LINES: usize = 60;
+/// The message of a download stopped by the user (not a failure).
+pub const CANCELLED: &str = "已取消下载";
 
 #[derive(Clone, Debug)]
 pub enum UpdateProgress {
@@ -60,7 +65,7 @@ impl PreparedUpdate {
     /// Start a temporary copy of this executable as an update supervisor, then
     /// allow the caller to exit normally. It reports installation failures even
     /// after the original UI has exited, and restores the previous app on error.
-    pub fn launch(self, install_dir: &Path) -> Result<()> {
+    pub fn launch(self, install_dir: &Path, relaunch: bool) -> Result<()> {
         ensure!(
             install_dir.is_absolute() && install_dir.is_dir(),
             "无法确定 SightOCR 的安装目录"
@@ -84,6 +89,7 @@ impl PreparedUpdate {
                     .map(|byte| format!("{byte:02x}"))
                     .collect(),
                 parent_pid: std::process::id(),
+                relaunch,
             };
             let manifest_path = self.directory.path().join(MANIFEST_NAME);
             let bytes =
@@ -119,6 +125,14 @@ struct UpdateManifest {
     size: u64,
     sha256: String,
     parent_pid: u32,
+    /// Start SightOCR after a successful update. False when the user chose to
+    /// install while exiting. Older helpers did not write it: they relaunched.
+    #[serde(default = "relaunch_by_default")]
+    relaunch: bool,
+}
+
+fn relaunch_by_default() -> bool {
+    true
 }
 
 fn read_manifest(path: &Path, helper: &Path) -> Result<(UpdateManifest, PathBuf, [u8; 32])> {
@@ -208,6 +222,7 @@ pub fn apply_update(manifest_path: &Path) -> Result<()> {
         use std::process::{Command, Stdio};
 
         let helper = std::env::current_exe().map_err(|_| anyhow!("无法确定更新辅助程序位置"))?;
+        let relaunch = read_manifest(manifest_path, &helper)?.0.relaunch;
         apply_manifest(
             manifest_path,
             &helper,
@@ -223,6 +238,7 @@ pub fn apply_update(manifest_path: &Path) -> Result<()> {
                 log_arg.push(&log_path);
                 let status = Command::new(installer)
                     .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE"])
+                    .args((!relaunch).then_some("/NOLAUNCH"))
                     .arg(&directory_arg)
                     .arg(&log_arg)
                     .stdin(Stdio::null())
@@ -233,7 +249,7 @@ pub fn apply_update(manifest_path: &Path) -> Result<()> {
                 let code = match status {
                     Ok(status) => status.code().unwrap_or(-1),
                     Err(error) if error.raw_os_error() == Some(740) => {
-                        run_elevated_installer(installer, directory_arg, log_arg)?
+                        run_elevated_installer(installer, directory_arg, log_arg, relaunch)?
                     }
                     Err(error) => return Err(anyhow!("无法运行更新安装程序：{error}")),
                 };
@@ -265,6 +281,7 @@ fn run_elevated_installer(
     installer: &Path,
     directory_arg: std::ffi::OsString,
     log_arg: std::ffi::OsString,
+    relaunch: bool,
 ) -> Result<i32> {
     use std::{mem::size_of, os::windows::ffi::OsStrExt};
     use windows_sys::Win32::{
@@ -280,8 +297,11 @@ fn run_elevated_installer(
     let path: Vec<u16> = installer.as_os_str().encode_wide().chain(Some(0)).collect();
     // Windows paths cannot contain quotes. Quote each whole argument, including
     // the /DIR= and /LOG= prefixes, to preserve spaces and non-ASCII characters.
-    let mut parameters =
-        std::ffi::OsString::from("/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /UPDATE \"");
+    let mut parameters = std::ffi::OsString::from(if relaunch {
+        "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /UPDATE \""
+    } else {
+        "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /UPDATE /NOLAUNCH \""
+    });
     parameters.push(directory_arg);
     parameters.push("\" \"");
     parameters.push(log_arg);
@@ -511,9 +531,14 @@ struct Release {
     draft: bool,
     prerelease: bool,
     assets: Vec<Asset>,
+    /// Markdown release notes; display text only, never an authority.
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Asset {
     name: String,
     browser_download_url: String,
@@ -522,11 +547,68 @@ struct Asset {
     digest: Option<String>,
 }
 
+#[derive(Clone)]
 struct AvailableUpdate {
     version: String,
     installer: Asset,
     checksums: Option<Asset>,
     digest: Option<[u8; 32]>,
+    notes: String,
+    page_url: Option<String>,
+}
+
+/// A newer official release found by [`check`]; nothing has been downloaded yet.
+#[derive(Clone)]
+pub struct UpdateInfo(AvailableUpdate);
+
+impl UpdateInfo {
+    pub fn version(&self) -> &str {
+        &self.0.version
+    }
+
+    /// Plain-text release notes, bounded in length (may be empty).
+    pub fn notes(&self) -> &str {
+        &self.0.notes
+    }
+
+    /// Installer size in bytes.
+    pub fn size(&self) -> u64 {
+        self.0.installer.size
+    }
+
+    /// The release page on the official repository, when published.
+    pub fn page_url(&self) -> Option<&str> {
+        self.0.page_url.as_deref()
+    }
+}
+
+/// Turn Markdown release notes into short plain text for the About page.
+fn release_notes(body: &str) -> String {
+    let mut lines = Vec::new();
+    let mut chars = 0;
+    for line in body.lines() {
+        let line: String = line.chars().filter(|c| !c.is_control()).collect();
+        let mut line = line.trim().trim_start_matches('#').trim().to_owned();
+        for marker in ["**", "__", "`"] {
+            line = line.replace(marker, "");
+        }
+        if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            line = format!("• {item}");
+        }
+        if line.is_empty() && lines.last().is_none_or(|last: &String| last.is_empty()) {
+            continue;
+        }
+        chars += line.chars().count();
+        if lines.len() >= MAX_NOTES_LINES || chars > MAX_NOTES_CHARS {
+            lines.push("…".into());
+            break;
+        }
+        lines.push(line);
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines.join("\n")
 }
 
 fn numeric_version(version: &str) -> Result<[u64; 3]> {
@@ -644,11 +726,22 @@ fn parse_release(bytes: &[u8], current_version: &str) -> Result<Option<Available
             .ok_or_else(|| anyhow!("该版本没有可信的 SHA256 校验信息，无法自动安装"))?;
         validate_asset(checksums, &release.tag_name, MAX_CHECKSUM_BYTES)?;
     }
+    let notes = release
+        .body
+        .as_deref()
+        .map(release_notes)
+        .unwrap_or_default();
+    // Only the official repository's own release pages are offered as links.
+    let page_url = release
+        .html_url
+        .filter(|url| url.starts_with("https://github.com/FueTsui/SightOCR/releases/"));
     Ok(Some(AvailableUpdate {
         version,
         installer,
         checksums,
         digest,
+        notes,
+        page_url,
     }))
 }
 
@@ -676,6 +769,7 @@ fn stream_download(
     mut writer: impl Write,
     expected_size: u64,
     version: &str,
+    cancelled: &AtomicBool,
     notify: &impl Fn(UpdateProgress),
 ) -> Result<()> {
     let mut downloaded = 0;
@@ -687,6 +781,7 @@ fn stream_download(
         total: expected_size,
     });
     loop {
+        ensure!(!cancelled.load(Ordering::Acquire), CANCELLED);
         let count = reader
             .read(&mut buffer)
             .map_err(|_| NetworkFailure::Connection)?;
@@ -789,19 +884,24 @@ fn stage_download(
     })
 }
 
-/// Check stable versions numerically, download only the matching official setup,
-/// and return an installer only after size, SHA256, and PE verification succeeds.
-/// A missing checksum is a hard error; release notes are never an authority.
-pub fn check_and_download(
-    proxy: &ProxyConfig,
-    notify: impl Fn(UpdateProgress),
-) -> Result<Option<PreparedUpdate>> {
-    notify(UpdateProgress::Checking);
+/// Look up the latest stable official release. Nothing is downloaded.
+pub fn check(proxy: &ProxyConfig) -> Result<Option<UpdateInfo>> {
     let client = build_client(proxy)?;
     let metadata = fetch_bounded(&client, RELEASE_URL, true, MAX_METADATA_BYTES)?;
-    let Some(update) = parse_release(&metadata, env!("CARGO_PKG_VERSION"))? else {
-        return Ok(None);
-    };
+    Ok(parse_release(&metadata, env!("CARGO_PKG_VERSION"))?.map(UpdateInfo))
+}
+
+/// Download the release found by [`check`] and return an installer only after
+/// size, SHA256 and PE verification succeed. A missing checksum is a hard error;
+/// release notes are never an authority. `cancelled` stops between chunks.
+pub fn download(
+    proxy: &ProxyConfig,
+    info: &UpdateInfo,
+    cancelled: &AtomicBool,
+    notify: impl Fn(UpdateProgress),
+) -> Result<PreparedUpdate> {
+    let update = &info.0;
+    let client = build_client(proxy)?;
     let expected_hash = match update.digest {
         Some(digest) => digest,
         None => {
@@ -825,8 +925,9 @@ pub fn check_and_download(
             checksum_for(&bytes, &update.installer.name)?
         }
     };
-    stage_download(&update, &expected_hash, &notify, |installer| {
+    stage_download(update, &expected_hash, &notify, |installer| {
         retry(|| {
+            ensure!(!cancelled.load(Ordering::Acquire), CANCELLED);
             let response = request(&client, &update.installer.browser_download_url, false)?;
             ensure!(
                 response
@@ -840,9 +941,21 @@ pub fn check_and_download(
                 file,
                 update.installer.size,
                 &update.version,
+                cancelled,
                 &notify,
             )
         })
     })
-    .map(Some)
+}
+
+/// [`check`] followed immediately by [`download`].
+pub fn check_and_download(
+    proxy: &ProxyConfig,
+    notify: impl Fn(UpdateProgress),
+) -> Result<Option<PreparedUpdate>> {
+    notify(UpdateProgress::Checking);
+    let Some(info) = check(proxy)? else {
+        return Ok(None);
+    };
+    download(proxy, &info, &AtomicBool::new(false), notify).map(Some)
 }

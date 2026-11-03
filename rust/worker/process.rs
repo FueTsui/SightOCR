@@ -623,16 +623,32 @@ mod tests {
             .expect("worker response")
     }
 
+    /// The former fixed OpenAI provider, as a migrated model interface.
+    fn sightocr_profile(key: &str) -> crate::config::ModelProfile {
+        crate::config::ModelProfile {
+            id: "openai".into(),
+            name: "OpenAI".into(),
+            protocol: crate::config::ModelProtocol::OpenaiChat,
+            base_url: crate::config::OPENAI_BASE_URL.into(),
+            api_key: key.into(),
+            ocr_model: crate::config::OPENAI_MODEL.into(),
+            translate_model: crate::config::OPENAI_MODEL.into(),
+        }
+    }
+
     #[test]
     fn protocol_round_trip_preserves_all_scripts_and_raw_pixels() {
         let text = "한국어 العربية हिन्दी ไทย ខ្មែរ 繁體中文 Українська 🧑🏽‍💻\n\t";
         let mut input = Vec::new();
         let mut original = request(42, text);
-        original.config.openai_api_key = "test-secret-only-in-memory".into();
+        original.config.model_profiles = vec![sightocr_profile("test-secret-only-in-memory")];
         write_request(&mut input, original).unwrap();
         let restored = read_request(&mut Cursor::new(&input)).unwrap().unwrap();
         assert_eq!(restored.id, 42);
-        assert_eq!(restored.config.openai_api_key, "test-secret-only-in-memory");
+        assert_eq!(
+            restored.config.model_profiles[0].api_key,
+            "test-secret-only-in-memory"
+        );
         assert!(matches!(restored.task, Task::Translate(value) if value == text));
 
         input.clear();
@@ -1041,9 +1057,9 @@ mod tests {
             });
             let (worker, outputs, _, _) = test_worker(mode);
             let config = Config {
-                openai_api_key: "synthetic-api-key".into(),
-                last_ocr_selection: "OpenAI_table".into(),
-                last_translate_selection: "OpenAI".into(),
+                model_profiles: vec![sightocr_profile("synthetic-api-key")],
+                last_ocr_selection: "Model.openai_table".into(),
+                last_translate_selection: "Model.openai".into(),
                 source_lang: "en".into(),
                 target_lang: "zh-Hans".into(),
                 proxy: ProxyConfig {

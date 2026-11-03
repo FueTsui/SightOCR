@@ -1,5 +1,6 @@
 /target/
 /dist/
+/release/
 /installer/
 __pycache__/
 *.pyc
@@ -13,3 +14,5 @@ __pycache__/
 /tests/oneocr/
 /tests/样本/
 /tests/fixtures/table-lines/
+/.env
+/.env.*

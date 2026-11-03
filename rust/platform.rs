@@ -20,7 +20,9 @@ use windows_sys::Win32::{
 };
 
 mod capture_render;
+mod clipboard;
 mod native_cursor;
+pub use clipboard::copy_text_and_html;
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()

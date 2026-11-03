@@ -1,12 +1,93 @@
 # 当前变更说明
 
+## 2026-11-02 修复识别结果滚动时文字闪烁（2.1.1 同版本重打包）
+
+原文与译文由 RichEdit 子窗口显示。它重绘时先擦除整行、再逐段绘制文字，桌面合成可能在两步之间呈现窗口，所以拖动或点击滚动条、在顶部或底部继续滚动时，会看到部分行缺字或整行消失。现改为在子类 `WM_PAINT` 中先用 `WM_PRINTCLIENT` 绘制到内存位图，再一次性复制到窗口；egui 滚动条的滚动与翻页记录为待执行请求，在父窗口完成本帧后暂停重绘、滚动、整窗重绘一次。去掉了向父窗口手动投递 `WM_PAINT` 的做法。版本保持 2.1.1。
+
+- 新增交互测试 `repeated_native_redraws_never_show_half_painted_text`：在测试进程自建的可见窗口中 3 秒内反复整窗重绘，并从另一线程读取该窗口已显示的像素。修复前 202 帧中 76 帧可见未画完的文字（最多缺失 1612 个字迹像素）；给子窗口加 `WS_EX_COMPOSITED` 后仍有 50/187 帧；改为内存位图绘制后连续 4 次均为 0。另新增 `buffered_paint_keeps_selection_highlight_and_scrolled_view` 与 `scrollbar_scrolls_wait_for_the_post_frame_redraw`，分别核对选区高亮与滚动后画面、滚动延后执行。
+- `native_text` 的 8 个交互测试中 7 个通过；`native_popup_hole_preserves_text_and_restores_the_full_window_region` 在未改动的 `a986106` 上以相同方式失败（测试未计入隐藏原生滚动条的裁剪区域），本轮未修改该测试。
+- 用户在 debug 构建中确认滚动闪烁已消失。
+- 在 `C:\dev\sightocr` 运行 `scripts/build.ps1 -Installer -Toolchain 1.97.0-x86_64-pc-windows-msvc`：格式检查、严格 Clippy、串行默认测试通过（254 项通过、27 项显式忽略、0 项失败），随后完成 release 构建与安装包。便携包按原结构以 `SightOCR/` 为根目录重新压缩。
+- 只读解析安装包索引并验证整体数据 SHA-256，逐个解压内置的 11 个文件；安装包与便携包均与 `dist/SightOCR` 逐字节一致。三个 EXE 的文件版本和产品版本为 2.1.1，清单版本 2.1.1.0，Dependent Load Flags 为 `0x800`，无动态 C 运行库导入。改动文件经 gitleaks 扫描无泄露。
+- 当前本地安装包 SHA-256：`F73F1AF087E75EA8099666B514DE17BEA8BFB81EBDE9E41FBFF041730BD61A0B`；便携包：`2CEA17574FDBFD57994F3C5EA17152371CE622B5F2A7B16E7588039FDFDE3D85`。替换此前 `223B883E…71D7` 的同版本构建，旧附件已备份到 `target/flicker-fix-repack-20261102-233019/`。
+- 本节记录本地打包时的验证；发布提交、GitHub CI 和公开附件校验结果以 v2.1.1 Release 的 `VALIDATION.json` 为准。本轮未运行真实 UAC 安装、界面手动复制、Office 粘贴或真实云端服务测试。已安装的 2.1.1 需手动运行新安装包覆盖。
+
+## 2026-11-02 v2.1.1 正式发布核对
+
+将 2.1.1 功能分支快进合入 `main`；三个历史 release 分支的提交此前已被 `main` 包含，没有遗漏提交，也没有删除分支。README、安装说明与包内文档改为对应 v2.1.1 Release，旧的本地构建记录保留在下文作为历史证据。
+
+- 首次分支 CI 在 Rust 1.99 的严格 Clippy 检查中触发 `chunks_exact_to_as_chunks`。CLI 的 UTF-16 解码改为使用定长切片 `as_chunks::<2>()`，继续拒绝奇数字节和非法 UTF-16，并保持大小端与 BOM 行为。
+- 修正后在 Windows / MSVC 1.97.0 下重新运行格式检查、严格 Clippy 和串行默认测试：253 项通过、25 项显式忽略、0 项失败。未启用私有表格样本功能，未调用真实云端服务。
+- 正式附件包括 `SightOCR-Setup-2.1.1.exe`、`SightOCR-2.1.1-portable.zip`、`SHA256SUMS.txt` 与 `VALIDATION.json`。安装包和便携包均按 11 个文件核对，包内 README / 用户文档与最终源码同步；具体提交、附件校验值、CI 结果及未覆盖项以该 Release 的 `VALIDATION.json` 为准。
+- 本轮没有在用户真实安装环境运行 UAC 安装、界面手动复制或 Office 粘贴测试；不沿用历史测试作为本轮实测结论。复杂表格仍需人工校对，安装包尚无代码签名。
+
+## 2026-11-02 2.1.1 版本与更新说明同步（本地重打包，未发布）
+
+README 新增独立的源码版本徽章与「当前源码版本：2.1.1」，与跟随 GitHub 公开发布的 Release 徽章分开显示。2.1.1 更新日志补齐结构化表格、合并单元格与多格式复制、长数字文本保护、系统 DLL 加载加固、清单版本自动生成及打包脚本改进；安装说明同步更新，移除「2.0.0 用户升级到 2.0.1」的过时指引。本轮只更新文档，程序功能未改动。
+
+- 在 `C:\dev\sightocr` 运行 `scripts/build.ps1 -Installer -Toolchain 1.97.0-x86_64-pc-windows-msvc`，未设置外部 `CARGO_TARGET_DIR`：格式检查、严格 Clippy、串行默认测试通过（253 项通过、25 项显式忽略、0 项失败），随后完成 release 构建与打包。未启用 `private-table-samples`，本轮未重跑私有表格专项测试。
+- 提交前核对 `Cargo.toml`、`Cargo.lock` 的 sightocr 包条目、README 源码徽章 / 当前版本 / 更新日志、安装说明均为 2.1.1；三个 EXE 的文件版本和产品版本为 2.1.1，嵌入清单为 2.1.1.0，CLI `--version` 输出 `sightocr-cli 2.1.1`。
+- 只读解析安装包索引、验证整体数据 SHA-256，并逐个解压校验内置的 11 个文件，与 `dist/SightOCR` 逐字节一致。包内 README 与源码按打包规则过滤开发文档链接后的内容一致，三份使用文档与源码一致；`SHA256SUMS.txt` 三条校验值均匹配实际文件。三个 EXE 的 Dependent Load Flag 均为 `0x800`。
+- 当前本地安装包：`dist/installer/SightOCR-Setup-2.1.1.exe`；SHA-256：`DF6A5C43BA1EB6E6CF452BD764D24063F717DFE75657694B957E2A3C8A1D96FD`。本轮替换此前 `640C3EC4…0132` 的同版本构建，旧包与文档已备份到 `target/version-sync-20261102-205618/`。
+- 验证日志和逐文件核对结果在上述备份目录内。未执行 GitHub CI、推送、标签或公开发布；本轮未运行真实 UAC 安装、界面手动复制、Office 粘贴或真实云端服务测试。
+
+## 2026-11-02 表格合并单元格与多格式复制（未发布）
+
+表格识别结果新增结构化模型 `document::Table`：网格内容与 TSV 完全一致，另记录合并单元格。本地表格由缺失的内部线条与文字落位推断合并，百度、腾讯表格直接采用接口返回的跨度。模型经识别子进程传到界面；结果未修改时，复制同时写入 CF_UNICODETEXT（TSV）与 HTML Format（rowspan/colspan，12 位以上或以 0 开头的数字设为文本）。只存合并单元格，26 万格的稀疏表格序列化后仍小于 1 MiB，远低于 16 MiB 的进程间消息上限。验证环境：Windows 11 build 26300、`1.97.0-x86_64-pc-windows-msvc`；Documents 受「受控文件夹访问」保护，`CARGO_TARGET_DIR` 设在仓库外。
+
+- 格式检查、严格 Clippy（默认与 `private-table-samples` 两种配置）通过；`cargo test --locked --features private-table-samples -- --test-threads=1` 264 项通过、25 项显式忽略、0 项失败。
+- 9 张私有样本：TSV 与改动前逐字一致；人工标注的 45 处合并识别出 43 处，table3 表头 2 处因竖线过淡偏一格（固定为已知差异），其余标注表格无多余合并。
+- 用 Rust 写剪贴板的临时探针，配合 Excel、Word（COM，隐藏实例，不保存）粘贴：table3 的 7 处合并在 Excel 中逐一一致；身份证号、银行卡号、`00123` 保持文本，金额仍为数值；Word 粘贴为 19 行、145 格的非均匀表格。测试前后剪贴板全部可读格式已恢复，无遗留 Office 进程。
+- 未覆盖：在运行中的 SightOCR 界面里手动复制（界面冒烟测试只记录复制文本）、WPS 与 LibreOffice、云端表格的真实接口返回、多张云端表格一次粘贴。
+
+## 2026-11-02 审计修复：DLL 加载加固与测试如实报告（未发布）
+
+审计发现：GNU 工具链构建的安装包以管理员权限从「下载」或 `%TEMP%` 运行时，会先从自身目录加载 `dwmapi.dll`、`uxtheme.dll`、`opengl32.dll` 等非 KnownDLLs 系统库（CWE-427）。本次改为 MSVC 构建，并为所有程序设置 `/DEPENDENTLOADFLAG:0x800`、静态链接 CRT。同时：缺少 OneOCR 资源时 CLI 模型测试改为显式忽略；`app.manifest` 版本由 `build.rs` 按 `Cargo.toml` 生成（原为过时的 2.0.3.0）；EXE 版权由「All rights reserved」改为 MIT 声明；`SHA256SUMS.txt` 不再使用 `../` 路径。验证环境：Windows 11 build 26300、`1.97.0-x86_64-pc-windows-msvc`、MSVC 链接器 14.44。
+
+- `scripts/build.ps1 -Installer -Toolchain 1.97.0-x86_64-pc-windows-msvc`：格式检查、严格 Clippy、串行默认测试 248 项通过、25 项显式忽略、0 项失败（新增 2 项 PE 加固测试）。未启用 `private-table-samples`，未使用 `-SkipOptionalFontTests`。
+- dumpbin 确认 `SightOCR.exe`、`sightocr-cli.exe`、`SightOCR-Setup-2.1.1.exe` 的 Dependent Load Flag 均为 `0x800`，且不导入 `VCRUNTIME*`、`api-ms-win-crt-*`；清单版本为 `2.1.1.0`。
+- 植入测试：在 CLI 同目录放置伪造的 `bcrypt.dll`，旧 GNU 构建启动失败（加载了伪造 DLL，退出码 127），新构建忽略该文件正常运行（退出码 0）。
+- `scripts/test-installer.ps1`（PowerShell 7，MSVC 调试版 Setup）62 项全部通过，含用 2.0.3 程序内更新器升级、真实安装包加 CLI 识别示例表格。
+- 新安装包 SHA-256：`AAA5F5F7F7BFA7D2DED910E57D82D4C3085AD30ECC9F9031D0E68DCB29509BE4`，取代 10-28 的 `C44C2F9D…`。
+- 未覆盖：GitHub Actions CI、未装 VC++ 运行库的干净系统、真实 UAC 交互安装、`scripts/test-updater.ps1`、`scripts/test-table-samples.ps1`、真实云端服务。安装包仍无 Authenticode 签名。
+
+## 2.1.1 发布验证范围
+
+本次发布把 AI 调用方式从 MCP 服务改为一次性命令行程序 `sightocr-cli.exe` 与通用 Skill；安装包检测到已安装时提供卸载入口，安装与卸载窗口的版本号移到名称下方居中；修复卸载完成页停留超过 1 分钟时卸载程序要等重启才删除的问题。验证日期 2026-10-28，环境为 Windows 11 build 26300、Rust/Cargo 1.97.0、`stable-x86_64-pc-windows-gnu`。
+
+- 在含 OneOCR 资源的本地开发目录中运行 `scripts/build.ps1 -Installer`，通过格式检查、严格 Clippy 与串行默认测试：246 项通过、25 项显式忽略、0 项失败。新增 4 项 CLI 单元测试、4 项 CLI 进程集成测试（真实管道、中文与 UTF-16 输入、ASCII 转义 JSON、退出码、不输出凭据，并用本地模型识别示例表格；缺少模型时该项自动跳过）和 1 项安装器单元测试。未启用 `private-table-samples`。
+- `scripts/test-installer.ps1`（PowerShell 7，隔离注册表与目录）62 项全部通过：全新安装、从 Inno Setup 安装升级、旧 MCP 服务运行时拒绝更新且停止后升级删除 `sightocr-mcp.exe` 与 `docs\MCP.md`、替换失败回滚、早期目录迁移、静默卸载与自删除、拒绝损坏安装包，以及安装真实安装包后用 CLI 和真实模型识别表格。第 [2] 项实际以本机已安装的 2.1.0 `SightOCR.exe` 执行程序内更新流程（脚本标题仍写作 2.0.3）。
+- 安装窗口的卸载入口在隔离环境中用调试版逐步点按验证：底部右侧显示「卸载 v2.1.1」，点击后安装窗口立即关闭并打开已安装版本的卸载程序；卸载页按钮完整显示，不再被底部栏遮挡；卸载后在完成页停留 70 秒再关闭，安装目录与 `unins000.exe` 均被删除。
+- CLI release 构建每次识别约 0.8 秒，构建或安装后首次调用约 10 秒（首次读取模型文件及安全扫描）。Windows PowerShell 5.1 中 `--json` 输出与 `--text` 中文输入正常；本机控制台为 UTF-8，未复现中文系统默认代码页下纯文本输出乱码的情形。
+- 安装包与程序版本为 2.1.1，`SightOCR-Setup-2.1.1.exe` 的 SHA-256 为 `C44C2F9DB55FC9698E85231D1C31B1CB3F602587E7CD8AD53F7285C62B465853`；发布目录 11 个文件，不含 `sightocr-mcp.exe` 与 `docs\MCP.md`。
+- 本次未执行 GitHub Actions CI、真实在线翻译、`scripts/test-table-samples.ps1`（需私有样本）、`scripts/test-updater.ps1`，也未在真实 UAC 环境中交互安装或卸载。
+
+## 2.1.0 发布验证范围
+
+本次发布统一模型接口、改进本地表格与段落识别，并切换到 SightOCR 自带安装程序。README 和安装包、便携包均使用 2.1.0 截图。
+
+- 公开源码在不含 OneOCR 资源、真实业务表格和派生夹具的发布克隆中通过格式检查、严格 Clippy 与串行默认测试：244 项通过、25 项显式忽略、0 项失败。忽略项包括字体/交互环境检查和真实云端模型调用；未计为通过。
+- 依赖私有表格样本的 10 项专项测试改为显式 `private-table-samples` 功能，本地备齐夹具后可启用，不影响默认构建和程序行为。
+- 安装包与程序版本为 2.1.0；校验发布文件 SHA-256，并逐文件比对便携 ZIP 的 15 个文件。更新文档和截图时保留原有 GUI、MCP 程序二进制。
+- 按用户要求跳过 GitHub Actions CI；发布提交含 `[skip ci]`。本次未重新执行完整安装交互、真实云端服务或跨设备验收，不沿用历史 CI 结果作为本版结论。
+
+最终提交、发布文件和哈希见 Release 附件 `VALIDATION.json` 与 `SHA256SUMS.txt`。
+
+## 2.0.3 发布验证范围
+
+修复“跟随系统”模式只比较应用内代理配置、长期复用旧连接的问题。每次云端识别或翻译前比较代理环境变量及 Windows Internet Settings 的 ProxyEnable、ProxyServer、ProxyOverride；变化时重建客户端并清理百度 token / Bing 会话，配置不变时继续复用。直连、手动代理和证书校验行为保持不变；PAC/WPAD 仍不支持。
+
+常规设置移除“合并文本换行”和“以管理员运行”下方的两条辅助说明，开关及保存行为不变。
+
+新增隔离子进程回归通过真实 Windows 注册表读取及本地 TCP 连接，覆盖代理开启、关闭、重新开启、端口更换、绕过列表、环境变量变化与显式模式隔离。测试使用 RegOverridePredefKey 重定向到临时注册表，不修改用户实际系统代理；直连以 TLS ClientHello 验证，未绕过证书检查或调用付费云服务。完整构建、安装包与公开 CI 结果以本次 Release 附件 VALIDATION.json 为准。
+
 ## 2.0.2 发布验证范围
 
 本版修复旧卸载登记键名匹配，使用真实历史键名的隔离安装测试覆盖跨目录迁移、卸载失败拦截、配置备份、用户文件保留，以及管理员启动和开机启动选项恢复。截图仅经内存和匿名管道传递；旧截图残留清理有保留期限及文件名边界测试。Python 代码与依赖清单已移除。
 
 本版最终构建、CI、安装包与校验和证据见 GitHub Release 附件 VALIDATION.json。隔离测试不等于真实用户环境的 UAC、跨账户安装和网页快捷键验收；这些边界尚未完成交互测试。下面保留各历史版本的验证记录，不作为本版新增验收结论。
 
-2026-09-12：CLI 已移除，改为独立 MCP 程序与通用 Skill；下文为历次构建记录，其中旧 CLI 验证不适用于当前版本。当前调用方式见 [MCP 与 Skill](MCP.md)。
+2026-10-28：MCP 服务已移除，改为一次性命令行程序 `sightocr-cli.exe` 与通用 Skill，当前调用方式见 [CLI 与 Skill](CLI.md)。2026-09-12：旧 CLI 移除，改为独立 MCP 程序与通用 Skill。下文为历次构建记录，其中 MCP 与旧 CLI 的验证不适用于当前版本。
 
 # 验证记录
 
@@ -40,7 +121,7 @@
 - 默认 Bing 的授权 GET 原先使用禁止跳转的通用客户端，正常地区 HTTP 302 被当成失败；翻译 POST 和 Referer 也固定在 www。现在仅授权 GET 可在 HTTPS `www.bing.com`、`cn.bing.com` 间最多跳转 5 次，检查循环、非法地址及总超时，按 Cookie 域/路径/过期语义保存会话，并使用最终站点发起翻译。其他接口和翻译 POST 继续禁止自动重定向。
 - Bing 的 7 项本地 HTTP 回归通过，覆盖地区 302、相对 301、会话到译文、Cookie 范围、跳转限制及非法跳转。真实 Microsoft 往返使用合成 `Hello world`，系统代理和直连分别连续翻译两次成功，并验证会话复用；从未读取实际服务密钥或输出 Cookie/token。
 - 安装和便携包包含 CLI 与使用文档，校验和增加 CLI 程序；安装器覆盖同目录 GUI/CLI 进程检测。自动更新发现常驻 CLI/MCP 时立即提示先停止服务，避免无法收到 GUI 退出消息而等待 120 秒。安装回归包含真实 MCP 进程初始化、更新拒绝与文件保持检查。
-- 当前验证环境为 Windows 11 build 26200、Rust/Cargo 1.97.0、`stable-x86_64-pc-windows-gnu`。Win10 所报的地区 302 通过 HTTP 模拟覆盖，尚未在 Win10 实机复测。Bing 网页兼容接口仍可能随服务方变化。MCP 首版串行运行，不提供调用中的即时取消；具体限制见 [MCP 与 Skill](MCP.md)。
+- 当前验证环境为 Windows 11 build 26200、Rust/Cargo 1.97.0、`stable-x86_64-pc-windows-gnu`。Win10 所报的地区 302 通过 HTTP 模拟覆盖，尚未在 Win10 实机复测。Bing 网页兼容接口仍可能随服务方变化。MCP 首版串行运行，不提供调用中的即时取消；具体限制见当时的 MCP 文档（已移除）。
 - 本次全局检查、编辑专项、最终程序/安装包测试结果及 SHA256 以 `dist/installer/VALIDATION.json` 为准，详细日志保存在 `target/cli-mcp-edit-bing-20260908/`。沿用 2.0.0 版本号，请按 SHA256 区分历史构建。
 - 本机普通并行 `cargo test --locked` 有三项旧环境测试失败：两项缺少补充字体的广泛字形覆盖，以及一项原生字体选择断言。原生字体选择测试单独串行复跑通过，构建脚本因此串行测试；两项字形覆盖保留原断言，只有显式 `-SkipOptionalFontTests` 才排除。本次安装包采用该选项，不将这两项计作通过。全局严格 Clippy 通过；GNU 链接器报告既有 `.drectve` 诊断，该诊断不属于 Clippy 错误，保留在构建日志。
 

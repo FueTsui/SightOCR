@@ -81,6 +81,7 @@ struct Report {
     native_language_menu_live: bool,
     native_language_changed_live: bool,
     text_stability: Vec<serde_json::Value>,
+    transition_flash: Vec<serde_json::Value>,
     wheel_scroll: Option<serde_json::Value>,
     native_editing: Vec<String>,
     empty_screenshot: bool,
@@ -157,6 +158,7 @@ enum Stage {
     NativeSteady,
     NativeStress,
     NativeContent,
+    NativeTransitions,
     NativeScrolling,
     NativeEditing,
     Empty,
@@ -170,6 +172,7 @@ enum Stage {
     Mistral,
     OpenAI,
     Nvidia,
+    Generic,
     Proxy,
     ProxyCompact,
     About,
@@ -208,6 +211,9 @@ pub(super) struct State {
     pending_screenshot: Option<&'static str>,
     framebuffer_screenshot: Option<egui::ColorImage>,
     text_stability_run: Option<text_stability_smoke::Run>,
+    flash_run: Option<text_stability_smoke::FlashRun>,
+    transition_step: u32,
+    transition_phase: u8,
     wheel_run: Option<wheel_smoke::Run>,
     editing_run: Option<editing_smoke::Run>,
     stability_redraws: [u64; 2],
@@ -220,6 +226,81 @@ pub(super) struct State {
     capture_handoff_run: Option<capture_handoff_smoke::Run>,
     close_discard_pending: bool,
     shutdown_evaluated: bool,
+}
+
+fn show_service(ctx: &egui::Context, key: &str) {
+    ctx.data_mut(|data| {
+        data.insert_temp(egui::Id::new("settings_service_provider"), key.to_owned())
+    });
+}
+
+/// Synthetic model interfaces as migrated from the former fixed providers, plus a
+/// local runtime. Keys are fake; the smoke run never sends requests.
+fn smoke_profiles() -> Vec<sightocr::config::ModelProfile> {
+    use sightocr::config::{self as c, ModelProfile, ModelProtocol};
+    let profile =
+        |id: &str, name: &str, protocol, base: &str, ocr: &str, translate: &str| ModelProfile {
+            id: id.into(),
+            name: name.into(),
+            protocol,
+            base_url: base.into(),
+            api_key: "synthetic-smoke-key".into(),
+            ocr_model: ocr.into(),
+            translate_model: translate.into(),
+        };
+    vec![
+        profile(
+            "mistral",
+            "Mistral OCR",
+            ModelProtocol::MistralOcr,
+            c::MISTRAL_BASE_URL,
+            c::MISTRAL_OCR_MODEL,
+            "",
+        ),
+        profile(
+            "openai",
+            "OpenAI",
+            ModelProtocol::OpenaiChat,
+            c::OPENAI_BASE_URL,
+            c::OPENAI_MODEL,
+            c::OPENAI_MODEL,
+        ),
+        profile(
+            "nvidia",
+            "NVIDIA",
+            ModelProtocol::OpenaiChat,
+            c::NVIDIA_BASE_URL,
+            c::NVIDIA_OCR_MODEL,
+            c::NVIDIA_TRANSLATE_MODEL,
+        ),
+        ModelProfile {
+            api_key: String::new(),
+            ..profile(
+                "ollama",
+                "本机 Ollama",
+                ModelProtocol::OpenaiChat,
+                "http://localhost:11434/v1",
+                "local-vision-model",
+                "local-text-model",
+            )
+        },
+    ]
+}
+
+/// Show a local-runtime model interface with a finished connection test.
+fn show_generic_service(app: &mut App, ctx: &egui::Context) {
+    show_service(ctx, "model:ollama");
+    ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(1060.0, 820.0)));
+    app.service_test = super::settings_ui::ServiceTest::Done {
+        profile: "ollama".into(),
+        ok: true,
+        message: "连接成功 · 0.8 秒 · 译文：你好，世界。".into(),
+    };
+}
+
+/// Run only the native editor transition flash check.
+fn transitions_only() -> bool {
+    std::env::var("SIGHTOCR_SMOKE_UI_SCENARIO").as_deref() == Ok("transitions")
 }
 
 fn settings_only() -> bool {
@@ -246,6 +327,7 @@ pub fn run(directory: PathBuf) -> Result<()> {
         silent_hotkey: "Ctrl+Alt+Shift+F22".into(),
         target_lang: "en".into(),
         hide_tray_icon: false,
+        model_profiles: smoke_profiles(),
         ..Config::default()
     };
     let path = scratch.path().join("config.json");
@@ -294,7 +376,11 @@ pub fn run(directory: PathBuf) -> Result<()> {
             *shutdown_sender.lock().unwrap() = Some(app.sender.clone());
             app.smoke_copies = Some(std::cell::RefCell::new(Vec::new()));
             // Exercise the --silent frame ordering without changing real tray/startup settings.
-            app.startup_hide_after_frames = if settings_only() { 0 } else { 2 };
+            app.startup_hide_after_frames = if settings_only() || transitions_only() {
+                0
+            } else {
+                2
+            };
             if settings_only() {
                 app.settings_open = true;
                 app.draft = app.config.clone();
@@ -302,13 +388,15 @@ pub fn run(directory: PathBuf) -> Result<()> {
             cc.egui_ctx.set_theme(egui::ThemePreference::Light);
             app.source = SAMPLE_SOURCE.into();
             app.translation = SAMPLE_TRANSLATION.into();
-            app.config.last_ocr_selection = "Mistral_auto".into();
-            app.config.last_translate_selection = "OpenAI".into();
+            app.config.last_ocr_selection = "Model.mistral_auto".into();
+            app.config.last_translate_selection = "Model.openai".into();
             app.status = "识别完成 · 已生成示例译文".into();
             app.smoke = Some(State {
                 directory: app_directory,
                 stage: if settings_only() {
                     Stage::Settings
+                } else if transitions_only() {
+                    Stage::NativeTransitions
                 } else {
                     Stage::Startup
                 },
@@ -319,6 +407,9 @@ pub fn run(directory: PathBuf) -> Result<()> {
                 pending_screenshot: None,
                 framebuffer_screenshot: None,
                 text_stability_run: None,
+                flash_run: None,
+                transition_step: 0,
+                transition_phase: 0,
                 wheel_run: None,
                 editing_run: None,
                 stability_redraws: [0; 2],
@@ -581,7 +672,7 @@ impl State {
                     }
                     Stage::NativeLanguageChanged => {
                         app.config.source_lang = "auto".into();
-                        app.config.last_ocr_selection = "Mistral_auto".into();
+                        app.config.last_ocr_selection = "Model.mistral_auto".into();
                         app.source = MULTILINGUAL_SOURCE.into();
                         app.translation.clear();
                         app.native_editors.blur();
@@ -641,29 +732,35 @@ impl State {
                     Stage::Services => {
                         self.report.lock().unwrap().services_screenshot = true;
                         if settings_only() {
-                            app.settings_tab = 3;
-                            ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(
-                                1060.0, 680.0,
-                            )));
-                            self.advance(Stage::Proxy);
+                            show_generic_service(app, ctx);
+                            self.advance(Stage::Generic);
                             return;
                         }
                         ctx.data_mut(|data| {
-                            data.insert_temp(egui::Id::new("settings_service_provider"), 4_usize)
+                            data.insert_temp(
+                                egui::Id::new("settings_service_provider"),
+                                "model:mistral".to_owned(),
+                            )
                         });
                         self.advance(Stage::Mistral);
                     }
                     Stage::Mistral => {
                         self.report.lock().unwrap().mistral_screenshot = true;
                         ctx.data_mut(|data| {
-                            data.insert_temp(egui::Id::new("settings_service_provider"), 5_usize)
+                            data.insert_temp(
+                                egui::Id::new("settings_service_provider"),
+                                "model:openai".to_owned(),
+                            )
                         });
                         self.advance(Stage::OpenAI);
                     }
                     Stage::OpenAI => {
                         self.report.lock().unwrap().openai_screenshot = true;
                         ctx.data_mut(|data| {
-                            data.insert_temp(egui::Id::new("settings_service_provider"), 6_usize)
+                            data.insert_temp(
+                                egui::Id::new("settings_service_provider"),
+                                "model:nvidia".to_owned(),
+                            )
                         });
                         // Exercise the longest model names at the minimum supported width.
                         ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(740.0, 580.0)));
@@ -671,9 +768,20 @@ impl State {
                     }
                     Stage::Nvidia => {
                         self.report.lock().unwrap().nvidia_screenshot = true;
+                        show_generic_service(app, ctx);
+                        self.advance(Stage::Generic);
+                    }
+                    Stage::Generic => {
+                        app.service_test = super::settings_ui::ServiceTest::Idle;
+                        app.draft = app.config.clone();
                         ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(
                             1060.0, 680.0,
                         )));
+                        if settings_only() {
+                            app.settings_tab = 3;
+                            self.advance(Stage::Proxy);
+                            return;
+                        }
                         app.settings_tab = 3;
                         app.draft.proxy = ProxyConfig {
                             mode: ProxyMode::Manual,
@@ -1146,6 +1254,16 @@ impl State {
                     return;
                 }
             }
+            Stage::NativeTransitions if self.flash_run.is_some() || self.stable() => {
+                if let Err(error) = self.poll_transitions(app, ctx) {
+                    self.fail(
+                        app,
+                        ctx,
+                        format!("Transition flash verification failed: {error:#}"),
+                    );
+                }
+                return;
+            }
             Stage::NativeScrolling if self.stable() => {
                 if self.wheel_run.is_none() {
                     match wheel_smoke::Run::start(app, ctx, self.directory.join("wheel")) {
@@ -1276,6 +1394,7 @@ impl State {
             Stage::Mistral if self.stable() => self.screenshot(ctx, "mistral.png"),
             Stage::OpenAI if self.stable() => self.screenshot(ctx, "openai.png"),
             Stage::Nvidia if self.stable() => self.screenshot(ctx, "nvidia.png"),
+            Stage::Generic if self.stable() => self.screenshot(ctx, "generic.png"),
             Stage::Proxy if self.stable() => {
                 if !own_window_matches_size([1060.0, 680.0]) {
                     self.fail(app, ctx, "Window did not resize to 1060x680".into());
@@ -1634,6 +1753,7 @@ impl State {
                     && report.native_language_menu_live
                     && report.native_language_changed_live
                     && report.text_stability.len() == 3
+                    && report.transition_flash.len() == 2
                     && report.wheel_scroll.is_some()
                     && report.native_editing.len() == 6
                     && report.empty_screenshot
@@ -1781,7 +1901,7 @@ impl State {
             "Idle result window is still repainting without input: {parent_frames} frames"
         );
         if matches!(self.stage, Stage::NativeContent) {
-            self.advance(Stage::NativeScrolling);
+            self.advance(Stage::NativeTransitions);
         } else if stress {
             ctx.set_theme(egui::ThemePreference::Light);
             app.source = MIXED_CONTENT_SOURCE.into();
@@ -1795,6 +1915,119 @@ impl State {
             app.native_editors.blur();
             self.advance(Stage::NativeStress);
         }
+        Ok(())
+    }
+
+    /// Show, hide and switch both native editors in the light theme while a sampler
+    /// reads the real display, and reject any near-black block. The window is never
+    /// resized while sampling: a resize edge is a separate OpenGL artifact.
+    fn poll_transitions(&mut self, app: &mut App, ctx: &egui::Context) -> Result<()> {
+        let compact = self.transition_phase == 1;
+        if self.flash_run.is_none() {
+            anyhow::ensure!(
+                !ctx.style().visuals.dark_mode,
+                "Transition flash check must run in the light theme"
+            );
+            // Keep the window above others instead of requiring foreground focus;
+            // the sampler still rejects any frame where it is covered.
+            if self.stage_frames < 10 {
+                ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+                ctx.request_repaint_after(Duration::from_millis(30));
+                return Ok(());
+            }
+            let wake = ctx.clone();
+            self.flash_run = Some(text_stability_smoke::FlashRun::start(
+                app.hwnd,
+                self.directory.join("stability").join(if compact {
+                    "light-transitions-compact"
+                } else {
+                    "light-transitions"
+                }),
+                move || wake.request_repaint(),
+            )?);
+            self.transition_step = 0;
+            return Ok(());
+        }
+        if self.stage_frames.is_multiple_of(6) {
+            self.transition_step += 1;
+            let step = self.transition_step;
+            if compact {
+                match step % 4 {
+                    0 => {
+                        app.source = MIXED_CONTENT_SOURCE.into();
+                        app.translation = MIXED_CONTENT_SOURCE.into();
+                        app.compact_result_tab = 0;
+                    }
+                    1 => app.compact_result_tab = 1,
+                    2 => {
+                        app.source.clear();
+                        app.translation.clear();
+                        app.editing_text = false;
+                    }
+                    _ => {
+                        app.source = MIXED_CONTENT_SOURCE.into();
+                        app.translation = MIXED_CONTENT_SOURCE.into();
+                        app.compact_result_tab = 1;
+                    }
+                }
+            } else {
+                match step % 3 {
+                    0 => {
+                        app.source = MIXED_CONTENT_SOURCE.into();
+                        app.translation = MIXED_CONTENT_SOURCE.into();
+                    }
+                    1 => {
+                        app.source.clear();
+                        app.translation.clear();
+                        app.editing_text = false;
+                    }
+                    _ => app.source = MIXED_CONTENT_SOURCE.into(),
+                }
+            }
+            app.native_editors.blur();
+        }
+        ctx.request_repaint_after(Duration::from_millis(16));
+        let Some(finished) = self.flash_run.as_mut().unwrap().try_finish() else {
+            return Ok(());
+        };
+        self.flash_run.take();
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+        let observed = finished?;
+        let mut evidence = serde_json::to_value(&observed)?;
+        evidence["phase"] = serde_json::json!(if compact { "compact" } else { "wide" });
+        self.report.lock().unwrap().transition_flash.push(evidence);
+        app.source = MIXED_CONTENT_SOURCE.into();
+        app.translation = MIXED_CONTENT_SOURCE.into();
+        app.compact_result_tab = 0;
+        app.native_editors.blur();
+        anyhow::ensure!(
+            observed.samples >= 20,
+            "Too few transition samples: {}",
+            observed.samples
+        );
+        anyhow::ensure!(
+            observed.max_black_tiles == 0,
+            "Native editor transition showed a black block: {} tiles at {:?} ms ({})",
+            observed.max_black_tiles,
+            observed.worst_at_ms,
+            observed.worst.display()
+        );
+        if !compact {
+            // Settle the compact layout before its own sampler starts.
+            self.transition_phase = 1;
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(740.0, 680.0)));
+            self.advance(Stage::NativeTransitions);
+            return Ok(());
+        }
+        self.transition_phase = 0;
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(egui::vec2(1060.0, 680.0)));
+        if transitions_only() {
+            self.report.lock().unwrap().complete = true;
+            app.exiting = true;
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return Ok(());
+        }
+        self.advance(Stage::NativeScrolling);
         Ok(())
     }
 

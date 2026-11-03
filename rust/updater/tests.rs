@@ -197,9 +197,14 @@ fn download_checks_lengths_and_reports_complete_progress() -> Result<()> {
     let bytes = executable_bytes();
     let events = RefCell::new(Vec::new());
     let mut result = Vec::new();
-    stream_download(Cursor::new(&bytes), &mut result, 128, "2.0.3", &|event| {
-        events.borrow_mut().push(event)
-    })?;
+    stream_download(
+        Cursor::new(&bytes),
+        &mut result,
+        128,
+        "2.0.3",
+        &AtomicBool::new(false),
+        &|event| events.borrow_mut().push(event),
+    )?;
     assert_eq!(result, bytes);
     assert!(matches!(
         events.borrow().first(),
@@ -217,11 +222,25 @@ fn download_checks_lengths_and_reports_complete_progress() -> Result<()> {
             ..
         })
     ));
-    let short =
-        stream_download(Cursor::new(&bytes[..50]), Vec::new(), 128, "2.0.3", &|_| {}).unwrap_err();
+    let short = stream_download(
+        Cursor::new(&bytes[..50]),
+        Vec::new(),
+        128,
+        "2.0.3",
+        &AtomicBool::new(false),
+        &|_| {},
+    )
+    .unwrap_err();
     assert!(retryable(&short));
-    let oversized =
-        stream_download(Cursor::new(&bytes), Vec::new(), 127, "2.0.3", &|_| {}).unwrap_err();
+    let oversized = stream_download(
+        Cursor::new(&bytes),
+        Vec::new(),
+        127,
+        "2.0.3",
+        &AtomicBool::new(false),
+        &|_| {},
+    )
+    .unwrap_err();
     assert!(!retryable(&oversized));
     Ok(())
 }
@@ -273,7 +292,7 @@ fn discarding_a_verified_update_removes_the_installer_and_directory() -> Result<
     );
     // Invalid destination returns before spawning any process and must clean up.
     assert!(update
-        .launch(Path::new("relative-invalid-install-directory"))
+        .launch(Path::new("relative-invalid-install-directory"), true)
         .is_err());
     assert!(!temp_path.exists());
     Ok(())
@@ -293,6 +312,7 @@ fn interrupted_or_corrupt_downloads_remove_their_real_staging_directory() -> Res
                     File::create(installer)?,
                     128,
                     "2.0.3",
+                    &AtomicBool::new(false),
                     &|_| {},
                 )
             } else {
@@ -460,6 +480,7 @@ fn helper_fixture() -> Result<(TempDir, PathBuf, PathBuf)> {
         size: bytes.len() as u64,
         sha256: format!("{:x}", Sha256::digest(&bytes)),
         parent_pid: 1234,
+        relaunch: true,
     };
     let manifest_path = staged.join(MANIFEST_NAME);
     let helper = staged.join(HELPER_NAME);
@@ -594,5 +615,64 @@ fn helper_rejects_manifests_outside_its_directory_and_malformed_metadata() -> Re
     }
     std::fs::write(&manifest, vec![b' '; MAX_MANIFEST_BYTES as usize + 1])?;
     assert!(read_manifest(&manifest, &helper).is_err());
+    Ok(())
+}
+
+#[test]
+fn release_notes_become_bounded_plain_text_and_only_official_pages_are_linked() -> Result<()> {
+    let mut value = release("2.0.3");
+    value["body"] = json!(
+        "## What's new\r\n\r\n- **Model interfaces** for `OCR`\n* Faster tables\n\n\n\u{7}Done"
+    );
+    value["html_url"] = json!("https://github.com/FueTsui/SightOCR/releases/tag/v2.0.3");
+    let update = parsed(&value)?.unwrap();
+    assert_eq!(
+        update.notes,
+        "What's new\n\n• Model interfaces for OCR\n• Faster tables\n\nDone"
+    );
+    assert_eq!(
+        update.page_url.as_deref(),
+        Some("https://github.com/FueTsui/SightOCR/releases/tag/v2.0.3")
+    );
+    value["html_url"] = json!("https://evil.example/SightOCR/releases/tag/v2.0.3");
+    value["body"] = json!("line\n".repeat(500));
+    let update = parsed(&value)?.unwrap();
+    assert!(update.page_url.is_none());
+    assert!(update.notes.lines().count() <= MAX_NOTES_LINES + 1);
+    assert!(update.notes.ends_with('…'));
+    // Notes are optional.
+    assert!(parsed(&release("2.0.3"))?.unwrap().notes.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_download_stops_before_reading_more_and_is_not_retried() {
+    let bytes = vec![7u8; 128];
+    let cancelled = AtomicBool::new(true);
+    let error = stream_download(
+        Cursor::new(&bytes),
+        Vec::new(),
+        128,
+        "2.0.3",
+        &cancelled,
+        &|_| {},
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), CANCELLED);
+    assert!(!retryable(&error));
+}
+
+#[test]
+fn manifests_from_older_helpers_relaunch_by_default() -> Result<()> {
+    let manifest: UpdateManifest = serde_json::from_value(json!({
+        "version": "2.0.3", "install_dir": "C:\\SightOCR", "size": 100,
+        "sha256": "00".repeat(32), "parent_pid": 4
+    }))?;
+    assert!(manifest.relaunch);
+    let manifest: UpdateManifest = serde_json::from_value(json!({
+        "version": "2.0.3", "install_dir": "C:\\SightOCR", "size": 100,
+        "sha256": "00".repeat(32), "parent_pid": 4, "relaunch": false
+    }))?;
+    assert!(!manifest.relaunch);
     Ok(())
 }

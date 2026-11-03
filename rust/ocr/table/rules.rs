@@ -20,7 +20,10 @@ pub(super) struct RuleSet {
 }
 
 pub(super) fn detect(image: &RgbaImage, lines: &[&TextLine], bounds: Rect, height: f32) -> RuleSet {
-    let margin = height * 2.0;
+    // Borders can sit well outside the text when cells are wide and centred
+    // (a photographed timetable), so the search margin grows with the table.
+    let margin =
+        (height * 2.0).max((bounds.right - bounds.left).max(bounds.bottom - bounds.top) * 0.12);
     let x0 = (bounds.left - margin).clamp(0.0, image.width() as f32) as usize;
     let y0 = (bounds.top - margin).clamp(0.0, image.height() as f32) as usize;
     let x1 = (bounds.right + margin + 1.0).clamp(0.0, image.width() as f32) as usize;
@@ -40,6 +43,22 @@ pub(super) fn detect(image: &RgbaImage, lines: &[&TextLine], bounds: Rect, heigh
             histogram[value as usize] += 1;
             gray.push(value);
         }
+    }
+    // Dark themes draw light rules on a dark background. Every detector below
+    // looks for strokes darker than their surroundings, so normalize polarity
+    // first: the background is the majority of the region.
+    let total: u64 = histogram.iter().sum();
+    let mut seen = 0;
+    let median = histogram
+        .iter()
+        .position(|&count| {
+            seen += count;
+            seen * 2 >= total
+        })
+        .unwrap_or(255);
+    if median < 110 {
+        gray.iter_mut().for_each(|value| *value = 255 - *value);
+        histogram.reverse();
     }
     let mut binary = adaptive_mask(&gray, width, rows, height, otsu(&histogram).clamp(20, 200));
     // Erase only the local rectangle. A label in a vertically merged cell may
@@ -117,20 +136,28 @@ pub(super) fn detect(image: &RgbaImage, lines: &[&TextLine], bounds: Rect, heigh
         y0,
         x0,
     );
-    let supported = |rule: &Rule, strict: &[Rule], length: usize| {
-        rule.end - rule.start >= length as f32 * 2.5
-            || strict.iter().any(|s| {
-                (s.position - rule.position).abs() <= 2.5
-                    && (s.end.min(rule.end) - s.start.max(rule.start)).max(0.0)
-                        >= (rule.end - rule.start) * 0.72
-            })
+    // A long one-sided edge (a coloured header block or a zebra stripe) is a row
+    // or column boundary only when it spans the whole table. A partial edge would
+    // otherwise be read as a partial border and merge unrelated cells.
+    let span_h = (bounds.right - bounds.left) * 0.9;
+    let span_v = (bounds.bottom - bounds.top) * 0.9;
+    let supported = |rule: &Rule, strict: &[Rule], length: usize, span: f32| {
+        // Text pressed against a thin rule splits its two-sided evidence into
+        // pieces; their combined coverage still identifies the stroke.
+        let coverage: f32 = strict
+            .iter()
+            .filter(|s| (s.position - rule.position).abs() <= 2.5)
+            .map(|s| (s.end.min(rule.end) - s.start.max(rule.start)).max(0.0))
+            .sum();
+        (rule.end - rule.start >= length as f32 * 2.5 && rule.end - rule.start >= span)
+            || coverage >= (rule.end - rule.start) * 0.72
     };
     detected
         .horizontal
-        .retain(|r| supported(r, &short_h, minimum_h));
+        .retain(|r| supported(r, &short_h, minimum_h, span_h));
     detected
         .vertical
-        .retain(|r| supported(r, &short_v, minimum_v));
+        .retain(|r| supported(r, &short_v, minimum_v, span_v));
     for &rule in &short_h {
         if rule.end - rule.start >= minimum_h as f32 {
             insert_rule(&mut detected.horizontal, rule, height, max_gap);
@@ -154,6 +181,8 @@ pub(super) fn detect(image: &RgbaImage, lines: &[&TextLine], bounds: Rect, heigh
             insert_rule(&mut detected.vertical, rule, height, max_gap);
         }
     }
+    merge_displaced_pieces(&mut detected.horizontal, height);
+    merge_displaced_pieces(&mut detected.vertical, height);
     detected.horizontal.sort_by(|a, b| {
         a.position
             .total_cmp(&b.position)
@@ -165,6 +194,38 @@ pub(super) fn detect(image: &RgbaImage, lines: &[&TextLine], bounds: Rect, heigh
             .then(a.start.total_cmp(&b.start))
     });
     detected
+}
+
+/// One border observed as two parallel pieces a few pixels apart: a tilted photo
+/// line found in two runs, a logo edge beside the border, or a blurred dark block
+/// pulling part of the border off its line. Space narrower than half a text line
+/// cannot hold a cell, so such pieces are one rule at the longer piece's position.
+fn merge_displaced_pieces(rules: &mut Vec<Rule>, height: f32) {
+    let near = (height * 0.6).max(4.0);
+    let mut index = 0;
+    'scan: while index < rules.len() {
+        for other in 0..rules.len() {
+            let (a, b) = (rules[index], rules[other]);
+            let gap = a.start.max(b.start) - a.end.min(b.end);
+            if other == index || (a.position - b.position).abs() > near || gap > height {
+                continue;
+            }
+            let keep = if a.end - a.start >= b.end - b.start {
+                a
+            } else {
+                b
+            };
+            rules[index] = Rule {
+                position: keep.position,
+                start: a.start.min(b.start),
+                end: a.end.max(b.end),
+            };
+            rules.swap_remove(other);
+            index = 0;
+            continue 'scan;
+        }
+        index += 1;
+    }
 }
 
 fn directional_mask(
@@ -181,31 +242,43 @@ fn directional_mask(
                 return false;
             }
             let (x, y) = (index % width, index / width);
-            let (before, after) = if vertical {
-                (
-                    y * width + x.saturating_sub(distance),
-                    y * width + (x + distance).min(width - 1),
-                )
-            } else {
-                (
-                    y.saturating_sub(distance) * width + x,
-                    (y + distance).min(rows - 1) * width + x,
-                )
+            // A border on the edge of the capture has only one neighbour: compare
+            // with the side that exists instead of with the pixel itself.
+            let (along, extent) = if vertical { (x, width) } else { (y, rows) };
+            let neighbour = |offset: Option<usize>| {
+                offset.filter(|&o| o < extent).map(|o| {
+                    if vertical {
+                        gray[y * width + o]
+                    } else {
+                        gray[o * width + x]
+                    }
+                })
             };
-            u16::from(gray[index]) + 4 < u16::from(gray[before].min(gray[after]))
+            let before = neighbour(along.checked_sub(distance));
+            let after = neighbour(along.checked_add(distance));
+            let Some(lighter) = before.into_iter().chain(after).min() else {
+                return false;
+            };
+            u16::from(gray[index]) + 4 < u16::from(lighter)
         })
         .collect()
 }
 
 fn joins_at_ends(rule: Rule, perpendicular: &[Rule], height: f32) -> bool {
     let tolerance = (height * 0.35).max(3.0);
-    [rule.start, rule.end].into_iter().all(|end| {
-        perpendicular.iter().any(|p| {
-            (end - p.position).abs() <= tolerance
-                && p.start - tolerance <= rule.position
-                && rule.position <= p.end + tolerance
+    // Compression ringing at a T-junction can extend a stroke a little past the
+    // border it meets; crossing a border still attaches to it.
+    let overshoot = (height * 0.5).max(4.0);
+    [(rule.start, -1.0), (rule.end, 1.0)]
+        .into_iter()
+        .all(|(end, outward)| {
+            perpendicular.iter().any(|p| {
+                let past = (end - p.position) * outward;
+                (-tolerance..=overshoot).contains(&past)
+                    && p.start - tolerance <= rule.position
+                    && rule.position <= p.end + tolerance
+            })
         })
-    })
 }
 
 fn insert_rule(rules: &mut Vec<Rule>, rule: Rule, height: f32, max_gap: usize) {

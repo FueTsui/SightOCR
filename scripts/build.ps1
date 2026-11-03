@@ -1,12 +1,20 @@
-param([switch]$Installer, [string]$IsccPath = $env:SIGHTOCR_ISCC, [switch]$SkipOptionalFontTests)
+param(
+    [switch]$Installer,
+    [switch]$SkipOptionalFontTests,
+    # Releases must use MSVC: only its linker sets DependentLoadFlags, which keeps
+    # the elevated Setup from loading planted DLLs (see tests/pe_hardening.rs).
+    [string]$Toolchain = 'stable-x86_64-pc-windows-msvc'
+)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
 $cargoCommand = Get-Command cargo -ErrorAction SilentlyContinue
 $cargoPath = if ($cargoCommand) { $cargoCommand.Source } else { Join-Path $env:USERPROFILE '.cargo/bin/cargo.exe' }
 if (-not (Test-Path -LiteralPath $cargoPath)) { throw 'Rust toolchain not found.' }
+if ($Toolchain -notmatch '-msvc$') { throw "Release builds require an MSVC toolchain, not '$Toolchain'." }
+# Check, test and build with the toolchain that produces the shipped binaries.
 function Invoke-Cargo([string[]]$CargoArguments) {
-    & $cargoPath @CargoArguments
+    & $cargoPath "+$Toolchain" @CargoArguments
     if ($LASTEXITCODE -ne 0) { throw "cargo $CargoArguments failed ($LASTEXITCODE)." }
 }
 Invoke-Cargo -CargoArguments @('fmt', '--all', '--', '--check')
@@ -23,24 +31,33 @@ if ($SkipOptionalFontTests) {
 }
 Invoke-Cargo -CargoArguments $testArguments
 Invoke-Cargo -CargoArguments @('build', '--release', '--locked', '--bins')
+# Honour CARGO_TARGET_DIR: under a folder protected by Controlled Folder Access
+# only allow-listed tools may write, so builds can live outside the checkout.
+$cargoTarget = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) } else { Join-Path $projectRoot 'target' }
 $packageRoot = Join-Path $projectRoot 'dist/SightOCR'
 $stagingRoot = Join-Path $projectRoot ('target/package-' + [guid]::NewGuid().ToString('N'))
 $modelRoot = Join-Path $stagingRoot 'resources/oneocr'
 New-Item -ItemType Directory -Path $modelRoot -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/SightOCR.exe') -Destination $stagingRoot
-Copy-Item -LiteralPath (Join-Path $projectRoot 'target/release/sightocr-mcp.exe') -Destination $stagingRoot
+Copy-Item -LiteralPath (Join-Path $cargoTarget 'release/SightOCR.exe') -Destination $stagingRoot
+Copy-Item -LiteralPath (Join-Path $cargoTarget 'release/sightocr-cli.exe') -Destination $stagingRoot
 foreach ($name in @('oneocr.dll', 'onnxruntime.dll', 'oneocr.onemodel')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "resources/oneocr/$name") -Destination $modelRoot -Force
 }
-Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $stagingRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $stagingRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'skills') -Destination $stagingRoot -Recurse
+# Ship user documentation only; development records stay in the repository.
+$shippedDocs = @('USAGE.md', 'INSTALLATION.md', 'CLI.md')
 $stagingDocs = Join-Path $stagingRoot 'docs'
 New-Item -ItemType Directory -Path $stagingDocs -Force | Out-Null
-foreach ($name in @('RUST_REFACTOR.md', 'VALIDATION.md', 'UI_DESIGN.md', 'INSTALLATION.md', 'MCP.md')) {
-    $sourceDocument = Join-Path $projectRoot "docs/$name"
-    if (Test-Path -LiteralPath $sourceDocument) { Copy-Item -LiteralPath $sourceDocument -Destination $stagingDocs }
+foreach ($name in $shippedDocs) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot "docs/$name") -Destination $stagingDocs
 }
+# Drop README lines that link to documents the package does not contain.
+$readme = [IO.File]::ReadAllLines((Join-Path $projectRoot 'README.md'), [Text.UTF8Encoding]::new($false)) | Where-Object {
+    $links = [regex]::Matches($_, '\]\(docs/([^)#]+\.md)')
+    -not ($links | Where-Object { $shippedDocs -notcontains $_.Groups[1].Value })
+}
+[IO.File]::WriteAllLines((Join-Path $stagingRoot 'README.md'), [string[]]$readme, [Text.UTF8Encoding]::new($false))
 # Preserve existing packages outside the publish directory rather than carrying
 # stale Python bundles, user configuration or logs into the new package.
 function Assert-WorkspacePath([string]$Candidate) {
@@ -72,28 +89,30 @@ try {
     throw
 }
 if ($Installer) {
-    $compiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-    $candidates = @($IsccPath)
-    if ($compiler) { $candidates += $compiler.Source }
-    $candidates += Join-Path $projectRoot 'target/tools/innosetup-6.7.3/ISCC.exe'
-    if (${env:ProgramFiles(x86)}) { $candidates += Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe' }
-    $resolvedCompiler = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
-    if (-not $resolvedCompiler) { throw 'Inno Setup 6 is required. Run scripts/prepare-installer.ps1, or set SIGHTOCR_ISCC / -IsccPath.' }
-    if ($IsccPath -and -not (Test-Path -LiteralPath $IsccPath -PathType Leaf)) { throw 'The explicit Inno compiler path does not exist.' }
+    # SightOCR's own setup program packs the published folder after itself.
     $versionMatch = [regex]::Match((Get-Content -Raw (Join-Path $projectRoot 'Cargo.toml')), '(?m)^version\s*=\s*"([^"]+)"')
     if (-not $versionMatch.Success) { throw 'Package version is missing from Cargo.toml.' }
-    & $resolvedCompiler "/DMyAppVersion=$($versionMatch.Groups[1].Value)" (Join-Path $projectRoot 'SightOCR.iss')
-    if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
-    $installerPath = Join-Path $projectRoot "dist/installer/SightOCR-Setup-$($versionMatch.Groups[1].Value).exe"
-    if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) { throw 'Installer output is missing.' }
+    $installerDir = Join-Path $projectRoot 'dist/installer'
+    New-Item -ItemType Directory -Path $installerDir -Force | Out-Null
+    $installerPath = Join-Path $installerDir "SightOCR-Setup-$($versionMatch.Groups[1].Value).exe"
+    # The release build has no console, so wait for it explicitly. It writes
+    # next to itself first: an unsigned Setup may not write into the checkout.
+    $packedPath = Join-Path $cargoTarget ('release/' + [IO.Path]::GetFileName($installerPath))
+    Remove-Item -LiteralPath $packedPath -Force -ErrorAction SilentlyContinue
+    $packer = Start-Process -FilePath (Join-Path $cargoTarget 'release/SightOCR-Setup.exe') `
+        -ArgumentList @('--pack', "`"$packageRoot`"", "`"$packedPath`"") -Wait -PassThru -NoNewWindow
+    if ($packer.ExitCode -ne 0) { throw "Installer packaging failed ($($packer.ExitCode))." }
+    if (-not (Test-Path -LiteralPath $packedPath -PathType Leaf)) { throw 'Installer output is missing.' }
+    Move-Item -LiteralPath $packedPath -Destination $installerPath -Force
     $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash
     $programHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'SightOCR.exe') -Algorithm SHA256).Hash
-    $mcpHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'sightocr-mcp.exe') -Algorithm SHA256).Hash
-    # Publish alongside the setup asset for clients whose GitHub digest is absent.
-    $checksumText = "$installerHash  $([IO.Path]::GetFileName($installerPath))`n$programHash  ../SightOCR/SightOCR.exe`n$mcpHash  ../SightOCR/sightocr-mcp.exe`n"
-    [IO.File]::WriteAllText((Join-Path $projectRoot 'dist/installer/SHA256SUMS.txt'), $checksumText, [Text.UTF8Encoding]::new($false))
+    $cliHash = (Get-FileHash -LiteralPath (Join-Path $packageRoot 'sightocr-cli.exe') -Algorithm SHA256).Hash
+    # Published next to the setup asset for clients whose GitHub digest is absent.
+    # Program paths are relative to the extracted portable package, never "../".
+    $checksumText = "$installerHash  $([IO.Path]::GetFileName($installerPath))`n$programHash  SightOCR/SightOCR.exe`n$cliHash  SightOCR/sightocr-cli.exe`n"
+    [IO.File]::WriteAllText((Join-Path $installerDir 'SHA256SUMS.txt'), $checksumText, [Text.UTF8Encoding]::new($false))
     Write-Host "Installer: $installerPath"
     Write-Host "Installer SHA256: $installerHash"
 }
 Write-Host "Built: $packageRoot/SightOCR.exe"
-Write-Host "MCP: $packageRoot/sightocr-mcp.exe"
+Write-Host "CLI: $packageRoot/sightocr-cli.exe"
