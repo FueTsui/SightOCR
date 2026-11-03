@@ -24,6 +24,7 @@ sightocr-cli --help | --version
 
 ## 输出与退出码
 
+- `--json` 的输出结构见 [CLI JSON Schema](CLI.schema.json)。
 - 默认把结果原文写到 stdout，不做转义；`languages` 和 `providers` 每项一行，字段以制表符分隔。
 - `--json` 输出一个 JSON 对象，所有非 ASCII 字符写成 `\uXXXX`，在任何控制台代码页下都不会乱码。识别和翻译结果在 `text` 字段。
 - `-o <文件>` 把结果以 UTF-8（无 BOM）写入文件，stdout 不输出内容。
