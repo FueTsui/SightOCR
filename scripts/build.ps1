@@ -44,21 +44,14 @@ foreach ($name in @('oneocr.dll', 'onnxruntime.dll', 'oneocr.onemodel')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "resources/oneocr/$name") -Destination $modelRoot -Force
 }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'LICENSE') -Destination $stagingRoot
-Copy-Item -LiteralPath (Join-Path $projectRoot 'CHANGELOG.md') -Destination $stagingRoot
 Copy-Item -LiteralPath (Join-Path $projectRoot 'skills') -Destination $stagingRoot -Recurse
-$stagingAssets = Join-Path $stagingRoot 'assets'
-New-Item -ItemType Directory -Path $stagingAssets -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $projectRoot 'assets/icon.png') -Destination $stagingAssets
 # Ship user documentation only; development records stay in the repository.
-$shippedDocs = @('USAGE.md', 'INSTALLATION.md', 'CLI.md', 'CLI.schema.json')
+$shippedDocs = @('USAGE.md', 'INSTALLATION.md', 'CLI.md')
 $stagingDocs = Join-Path $stagingRoot 'docs'
 New-Item -ItemType Directory -Path $stagingDocs -Force | Out-Null
 foreach ($name in $shippedDocs) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "docs/$name") -Destination $stagingDocs
 }
-$stagingScreenshots = Join-Path $stagingDocs 'screenshots/2.1.0'
-New-Item -ItemType Directory -Path $stagingScreenshots -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/screenshots/2.1.0/result.png') -Destination $stagingScreenshots
 # Drop README lines that link to documents the package does not contain.
 $readme = [IO.File]::ReadAllLines((Join-Path $projectRoot 'README.md'), [Text.UTF8Encoding]::new($false)) | Where-Object {
     $links = [regex]::Matches($_, '\]\(docs/([^)#]+\.md)')
